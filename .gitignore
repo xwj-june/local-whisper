@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Dolt (beads runtime — .beads/ is tracked, these are not)
+.dolt/
+.doltcfg/
+beads_*/
+config.yaml
+
+# Claude Code
+.claude/
