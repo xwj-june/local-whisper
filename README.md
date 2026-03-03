@@ -104,6 +104,7 @@ Update the device index in `~/whisper-dictate/config.sh` if it's not `:0`.
 | Ctrl+Alt+A | Set language: Auto-detect |
 | Ctrl+Alt+T | Cycle languages |
 | Ctrl+Alt+O | Toggle output mode (paste / type) |
+| Ctrl+Alt+X | Emergency stop (kill recording + close overlay) |
 
 ## How it works
 
