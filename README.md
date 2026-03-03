@@ -20,6 +20,17 @@ Hold **Right Option**, speak, release — text appears at your cursor.
 ## Install
 
 ```bash
+git clone https://github.com/luisalima/local-whisper.git
+cd local-whisper
+./install.sh
+```
+
+The installer handles everything: Homebrew dependencies, building whisper.cpp, downloading the model, detecting your microphone, and setting up Karabiner + Hammerspoon configs.
+
+<details>
+<summary>Manual install (if you prefer)</summary>
+
+```bash
 # 1. Dependencies
 brew install ffmpeg cmake git
 brew install --cask karabiner-elements hammerspoon
@@ -33,9 +44,19 @@ cmake --build build -j --config Release
 
 # 3. Download model (~1.5 GB)
 ./models/download-ggml-model.sh medium
+
+# 4. Copy scripts
+cp scripts/*.sh ~/whisper-dictate/
+chmod +x ~/whisper-dictate/*.sh
+
+# 5. Copy Hammerspoon config
+cp hammerspoon/init.lua ~/.hammerspoon/init.lua
+
+# 6. Copy Karabiner rule
+cp karabiner/local-whisper.json ~/.config/karabiner/assets/complex_modifications/
 ```
 
-Then follow the setup instructions below.
+</details>
 
 ## Setup
 
