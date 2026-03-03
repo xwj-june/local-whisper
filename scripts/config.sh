@@ -9,7 +9,14 @@ umask 077  # temp files owner-only (no world-readable transcripts)
 WHISPER_BIN="$HOME/whisper.cpp/build/bin/whisper-cli"
 WHISPER_MODEL="$HOME/whisper.cpp/models/ggml-medium.bin"
 FFMPEG="/opt/homebrew/bin/ffmpeg"
-HS="/usr/local/bin/hs"
+# hs may be at /usr/local/bin/hs or /opt/homebrew/bin/hs depending on install method
+if [[ -x "/usr/local/bin/hs" ]]; then
+    HS="/usr/local/bin/hs"
+elif [[ -x "/opt/homebrew/bin/hs" ]]; then
+    HS="/opt/homebrew/bin/hs"
+else
+    HS="hs"  # fall back to PATH
+fi
 
 # --- Audio device ---
 # ":default" = system default mic (follows System Settings selection)

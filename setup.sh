@@ -149,26 +149,75 @@ fi
 echo ""
 echo -e "${BOLD}Step 3: macOS permissions${NC}"
 echo ""
-info "Opening System Settings for each required permission..."
-info "Grant access to the apps listed, then press Enter to continue."
-echo ""
 
-# Input Monitoring (Karabiner)
-echo -e "  ${YELLOW}Input Monitoring${NC} — enable ${BOLD}karabiner_grabber${NC} and ${BOLD}karabiner_observer${NC}"
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" 2>/dev/null || true
-read -r -p "  Press Enter when done..."
+# Find hs binary for accessibility check
+HS_CHECK=""
+if [[ -x "/usr/local/bin/hs" ]]; then
+    HS_CHECK="/usr/local/bin/hs"
+elif [[ -x "/opt/homebrew/bin/hs" ]]; then
+    HS_CHECK="/opt/homebrew/bin/hs"
+fi
 
-# Accessibility (Hammerspoon)
-echo -e "  ${YELLOW}Accessibility${NC} — enable ${BOLD}Hammerspoon${NC}"
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
-read -r -p "  Press Enter when done..."
+FFMPEG_BIN="$(brew --prefix)/bin/ffmpeg"
+ALL_OK=true
 
-# Microphone (Terminal)
-echo -e "  ${YELLOW}Microphone${NC} — enable your ${BOLD}terminal app${NC} (Terminal, iTerm2, etc.)"
-open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" 2>/dev/null || true
-read -r -p "  Press Enter when done..."
+# ── Input Monitoring (Karabiner) ──
+if pgrep -q karabiner_grabber 2>/dev/null; then
+    ok "Input Monitoring: granted (karabiner_grabber running)"
+else
+    ALL_OK=false
+    warn "Input Monitoring: not yet granted"
+    echo -e "  Enable ${BOLD}karabiner_grabber${NC} and ${BOLD}karabiner_observer${NC}"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent" 2>/dev/null || true
+    read -r -p "  Press Enter when done..."
 
-ok "Permissions configured"
+    # Re-check
+    if pgrep -q karabiner_grabber 2>/dev/null; then
+        ok "Input Monitoring: granted"
+    else
+        warn "Input Monitoring: still not detected — Karabiner may need a restart"
+    fi
+fi
+
+# ── Accessibility (Hammerspoon) ──
+if [[ -n "$HS_CHECK" ]] && "$HS_CHECK" -c "return hs.accessibilityState()" 2>/dev/null | grep -q "true"; then
+    ok "Accessibility: granted (Hammerspoon)"
+else
+    ALL_OK=false
+    warn "Accessibility: not yet granted"
+    echo -e "  Enable ${BOLD}Hammerspoon${NC}"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
+    read -r -p "  Press Enter when done..."
+
+    # Re-check
+    if [[ -n "$HS_CHECK" ]] && "$HS_CHECK" -c "return hs.accessibilityState()" 2>/dev/null | grep -q "true"; then
+        ok "Accessibility: granted"
+    else
+        warn "Accessibility: could not verify — make sure Hammerspoon is enabled"
+    fi
+fi
+
+# ── Microphone (Terminal) ──
+if "$FFMPEG_BIN" -f avfoundation -i ":default" -t 0.1 -f null - 2>/dev/null; then
+    ok "Microphone: granted"
+else
+    ALL_OK=false
+    warn "Microphone: not yet granted"
+    echo -e "  Enable your ${BOLD}terminal app${NC} (Terminal, iTerm2, etc.)"
+    open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" 2>/dev/null || true
+    read -r -p "  Press Enter when done..."
+
+    # Re-check
+    if "$FFMPEG_BIN" -f avfoundation -i ":default" -t 0.1 -f null - 2>/dev/null; then
+        ok "Microphone: granted"
+    else
+        warn "Microphone: could not verify — you may need to restart your terminal"
+    fi
+fi
+
+if [[ "$ALL_OK" == true ]]; then
+    ok "All permissions already granted"
+fi
 
 # ─── Step 4: Hammerspoon CLI ────────────────────────────────────────────────
 echo ""
