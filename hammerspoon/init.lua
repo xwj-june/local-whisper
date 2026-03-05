@@ -736,23 +736,28 @@ local lastInsertedText = nil
 -- Recent dictations (newest first, max 10)
 local MAX_RECENT = 10
 
+local recentDictations = {}
+
 local function loadRecentDictations()
     local f = io.open(RECENT_FILE, "r")
-    if not f then return {} end
+    if not f then return end
     local data = f:read("*a"); f:close()
     local ok, result = pcall(hs.json.decode, data)
-    if ok and type(result) == "table" then return result end
-    return {}
+    if ok and type(result) == "table" then
+        -- Clear and populate in-place (preserve table reference)
+        for i = #recentDictations, 1, -1 do recentDictations[i] = nil end
+        for i, entry in ipairs(result) do recentDictations[i] = entry end
+    end
 end
 
 local function saveRecentDictations()
-    local ok, json = pcall(hs.json.encode, recentDictations, true)
+    local ok, json = pcall(hs.json.encode, recentDictations)
     if not ok then return end
     local f = io.open(RECENT_FILE, "w")
     if f then f:write(json); f:close() end
 end
 
-local recentDictations = loadRecentDictations()
+loadRecentDictations()
 
 -- Auto-stop state
 local silentChunkCount = 0
