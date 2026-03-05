@@ -12,6 +12,7 @@ Hold **Right Cmd**, speak, release — text appears at your cursor.
 - **Recording indicator**: Pulsing red dot and elapsed timer in the overlay
 - **Multi-language**: English, Portuguese, and auto-detect with preferred language fallback
 - **App-aware processing**: Auto-capitalizes in most apps, skips in terminals and code editors
+- **LLM refinement** (optional): Clean up dictated text with a local LLM via [Ollama](https://ollama.com) — fixes punctuation, removes filler words, formats numbered lists
 - **Text post-processing**: Remove filler words (um, uh, hmm), clean whitespace
 - **Custom vocabulary**: Provide a prompt file to improve recognition of domain-specific terms
 - **Auto-stop on silence**: Automatically stops recording after 3 seconds of silence
@@ -125,7 +126,7 @@ Update `AUDIO_DEVICE` in `~/.hammerspoon/init.lua` if it's not `:1`.
 
 A waveform icon in the menu bar shows recording status (turns red when recording). Click it to:
 
-- See current language, model, output mode, and enter mode
+- See current language, model, output mode, enter mode, and LLM refine status
 - Click any setting to cycle it
 - View and re-paste recent dictations
 - Open the settings overlay
@@ -143,6 +144,25 @@ Claude, Hammerspoon, whisper.cpp, ffmpeg, macOS, Lua, Anthropic
 ```
 
 This is passed as `--prompt` to whisper-cli for both partial and final transcription. Adding your voice command trigger words here improves recognition.
+
+## LLM refinement (optional)
+
+If you have [Ollama](https://ollama.com) installed, you can enable LLM-powered text cleanup. After transcription, the text is sent to a local LLM that fixes punctuation, removes filler words, and formats numbered lists — all on-device.
+
+1. Install Ollama: `brew install ollama`
+2. Pull a model: `ollama pull llama3.1:8b`
+3. Start Ollama: `ollama serve` (or `brew services start ollama`)
+4. Toggle in the menu bar or click **refine** in the overlay
+
+Refinement only runs on text longer than 50 characters. Short dictations are inserted as-is.
+
+### Customizing refinement
+
+| File | What it does |
+|------|-------------|
+| `~/.local-whisper/refine` | ON/OFF state (also togglable from menu bar / overlay) |
+| `~/.local-whisper/refine_model` | Ollama model to use (default: `llama3.1:8b`) |
+| `~/.local-whisper/refine_prompt` | Custom instructions for the LLM |
 
 ## Faster live preview
 
@@ -209,6 +229,7 @@ Modifier key hold/release (detected by Hammerspoon eventtap)
   → Partial transcription loop: concat latest chunks → whisper-cli (tiny model)
   → On release: concat all chunks → final whisper-cli transcription (chosen model)
   → Post-processing: remove fillers, capitalize, app-aware adjustments
+  → Optional LLM refinement via Ollama (punctuation, formatting, cleanup)
   → Voice command hooks: beforeInsert → actions → text insertion → afterInsert
   → Text inserted at cursor via paste (Cmd+V) or keystroke
 ```
