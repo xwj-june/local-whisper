@@ -104,6 +104,10 @@ local function getRefinePrompt()
 end
 
 local function hasOllama()
+    -- Check if Ollama API is reachable
+    local ok = os.execute("curl -s -o /dev/null -w '' http://localhost:11434/api/tags 2>/dev/null")
+    if ok then return true end
+    -- Fallback: check if binary exists
     return os.execute("command -v ollama >/dev/null 2>&1")
 end
 
@@ -273,30 +277,38 @@ local function refineWithOllama(text, callback)
         callback(text)
         return
     end
-    log("refine: sending to Ollama (" .. #text .. " chars)")
-    local input = getRefinePrompt() .. "\n\n" .. text
-    local ollamaPath = "/usr/local/bin/ollama"
-    if not hs.fs.attributes(ollamaPath) then
-        ollamaPath = "/opt/homebrew/bin/ollama"
-    end
-    if not hs.fs.attributes(ollamaPath) then
-        -- fallback: try PATH
-        ollamaPath = "ollama"
-    end
-    local tmpIn = WHISPER_TMP .. "/refine_input.txt"
-    local f = io.open(tmpIn, "w")
-    if f then f:write(input); f:close() end
-    local task = hs.task.new("/bin/sh", function(code, stdout, stderr)
-        if code == 0 and stdout and stdout:gsub("%s+", "") ~= "" then
-            local refined = stdout:gsub("^%s+", ""):gsub("%s+$", "")
-            log("refine: success (" .. #refined .. " chars)")
-            callback(refined)
-        else
-            log("refine: failed (code=" .. tostring(code) .. ", stderr=" .. tostring(stderr) .. "), using original")
-            callback(text)
+    log("refine: sending to Ollama API (" .. #text .. " chars)")
+    local prompt = getRefinePrompt() .. "\n\n" .. text
+    local model = getRefineModel()
+    -- Use Ollama HTTP API (more reliable than CLI, avoids version mismatch issues)
+    local jsonPayload = hs.json.encode({
+        model = model,
+        prompt = prompt,
+        stream = false,
+    })
+    local tmpPayload = WHISPER_TMP .. "/refine_payload.json"
+    local f = io.open(tmpPayload, "w")
+    if f then f:write(jsonPayload); f:close() end
+    local task = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+        if code == 0 and stdout and #stdout > 0 then
+            local ok, result = pcall(hs.json.decode, stdout)
+            if ok and result and result.response then
+                local refined = result.response:gsub("^%s+", ""):gsub("%s+$", "")
+                if refined ~= "" then
+                    log("refine: success (" .. #refined .. " chars)")
+                    callback(refined)
+                    return
+                end
+            end
         end
-    end, { "-c", ollamaPath .. " run " .. getRefineModel() .. " < " .. shellQuote(tmpIn) })
-    task:setEnvironment({ PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" })
+        log("refine: failed (code=" .. tostring(code) .. "), using original")
+        callback(text)
+    end, {
+        "-s", "-X", "POST",
+        "http://localhost:11434/api/generate",
+        "-H", "Content-Type: application/json",
+        "-d", "@" .. tmpPayload,
+    })
     task:start()
 end
 
