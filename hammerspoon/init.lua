@@ -63,6 +63,16 @@ local PREFERRED_LANGS_FILE = HOME .. "/.whisper_dictation_preferred_langs"
 local ENTER_FILE = HOME .. "/.whisper_dictation_enter"
 local LOG_FILE = WHISPER_TMP .. "/whisper-dictate.log"
 
+-- Custom vocabulary prompt file
+local PROMPT_FILE = HOME .. "/.whisper_dictation_prompt"
+
+-- Action hooks config
+local ACTIONS_FILE = HOME .. "/.hammerspoon/local_whisper_actions.lua"
+
+-- Auto-stop on silence
+local AUTO_STOP_SILENCE_SECONDS = 3
+local AUTO_STOP_THRESHOLD_DB = -40
+
 -- Timing
 local PARTIAL_INTERVAL = 2.0   -- seconds between partial transcriptions
 local OVERLAY_LINGER = 0.5     -- seconds to show final text before closing
@@ -150,6 +160,63 @@ local function getEnterMode()
     return mode == "on"
 end
 
+local function shellQuote(text)
+    return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
+end
+
+local function expandPath(path)
+    if type(path) ~= "string" then return nil end
+    if path:sub(1, 2) == "~/" then return HOME .. path:sub(2) end
+    return path
+end
+
+local function ensureParentDir(path)
+    local parent = path:match("^(.*)/[^/]+$")
+    if not parent or parent == "" then return true end
+    local ok = os.execute("mkdir -p " .. shellQuote(parent))
+    return ok == true or ok == 0
+end
+
+local function normalizeText(text)
+    return ((text or ""):gsub("%s+", " ")):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- App bundle IDs where auto-capitalize should be skipped (terminals, code editors)
+local NO_CAPITALIZE_APPS = {
+    ["com.apple.Terminal"] = true,
+    ["com.googlecode.iterm2"] = true,
+    ["dev.warp.Warp-Stable"] = true,
+    ["com.microsoft.VSCode"] = true,
+    ["com.apple.dt.Xcode"] = true,
+    ["com.jetbrains.intellij"] = true,
+    ["com.sublimetext.4"] = true,
+    ["com.github.atom"] = true,
+    ["dev.zed.Zed"] = true,
+}
+
+-- Text post-processing: capitalize, remove fillers, clean whitespace
+-- appBundleID is optional; when provided, adjusts behavior per-app
+local function postProcess(text, appBundleID)
+    -- Trim
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    if text == "" then return text end
+    -- Remove filler words (standalone, case-insensitive)
+    text = text:gsub("%f[%w][Uu][mm]%f[%W]", "")
+    text = text:gsub("%f[%w][Uu][hh]%f[%W]", "")
+    text = text:gsub("%f[%w][Hh][Mm][Mm]+%f[%W]", "")
+    -- Remove "like," used as filler (comma-following)
+    text = text:gsub("%f[%w][Ll]ike,%s*", "")
+    -- Collapse multiple spaces
+    text = text:gsub("%s+", " ")
+    -- Trim again after removals
+    text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    -- Auto-capitalize first letter (skip for terminals and code editors)
+    if not (appBundleID and NO_CAPITALIZE_APPS[appBundleID]) then
+        text = text:gsub("^%l", string.upper)
+    end
+    return text
+end
+
 local function isHallucination(text)
     local lower = text:lower():gsub("^%s+", ""):gsub("%s+$", "")
     -- strip trailing period for comparison
@@ -211,6 +278,227 @@ local function cycleEnter()
     return next
 end
 
+-- Pick fastest available model for live partial transcription
+local function getPartialModelPath()
+    local preferred = { "tiny", "tiny.en", "base", "base.en", "small", "small.en" }
+    for _, name in ipairs(preferred) do
+        local path = MODELS_DIR .. "/ggml-" .. name .. ".bin"
+        if hs.fs.attributes(path) then return path end
+    end
+    return getModelPath()  -- fall back to main model
+end
+
+-- Read custom vocabulary prompt for whisper
+local function getPromptArgs()
+    local content = readFile(PROMPT_FILE):gsub("%s+$", "")
+    if content ~= "" then return { "--prompt", content } end
+    return {}
+end
+
+--------------------------------------------------------------------------------
+-- App-aware context (captured at recording start)
+--------------------------------------------------------------------------------
+
+local capturedAppName = nil
+local capturedAppBundleID = nil
+
+local function captureActiveApp()
+    local app = hs.application.frontmostApplication()
+    if app then
+        capturedAppName = app:name()
+        capturedAppBundleID = app:bundleID()
+    else
+        capturedAppName = nil
+        capturedAppBundleID = nil
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Optional post-dictation action hooks (user config)
+--------------------------------------------------------------------------------
+
+local actionConfig = nil
+local actionConfigMtime = 0
+
+local function safeHookCall(label, fn, ctx)
+    local ok, err = pcall(fn, ctx)
+    if not ok then
+        log("actions: " .. label .. " failed: " .. tostring(err))
+    end
+end
+
+-- Auto-reload: check mtime and reload if file changed
+local function loadActionConfig()
+    local attr = hs.fs.attributes(ACTIONS_FILE)
+    if not attr then
+        actionConfig = nil
+        actionConfigMtime = 0
+        return nil
+    end
+
+    local mtime = attr.modification or 0
+    if actionConfig and mtime == actionConfigMtime then
+        return actionConfig
+    end
+
+    local chunk, err = loadfile(ACTIONS_FILE)
+    if not chunk then
+        log("actions: could not load config: " .. tostring(err))
+        return nil
+    end
+
+    local ok, cfg = pcall(chunk)
+    if not ok then
+        log("actions: config execution failed: " .. tostring(cfg))
+        return nil
+    end
+    if type(cfg) ~= "table" then
+        log("actions: config must return a table")
+        return nil
+    end
+
+    actionConfig = cfg
+    actionConfigMtime = mtime
+    log("actions: loaded " .. ACTIONS_FILE)
+    return actionConfig
+end
+
+local function reloadActionConfig()
+    actionConfigMtime = 0
+    actionConfig = nil
+    return loadActionConfig()
+end
+
+local function buildActionContext(text, lang, mode)
+    local ctx = {
+        text = text,
+        textLower = text:lower(),
+        originalText = text,
+        lang = lang,
+        outputMode = mode,
+        appName = capturedAppName,
+        appBundleID = capturedAppBundleID,
+        insert = true,
+        inserted = false,
+        handled = false,
+        timestamp = os.time(),
+        isoTime = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+    function ctx:setText(newText)
+        if type(newText) ~= "string" then return end
+        self.text = normalizeText(newText)
+        self.textLower = self.text:lower()
+    end
+
+    function ctx:disableInsert()
+        self.insert = false
+    end
+
+    function ctx:enableInsert()
+        self.insert = true
+    end
+
+    function ctx:launchApp(appName)
+        if type(appName) ~= "string" or appName == "" then return false end
+        return hs.application.launchOrFocus(appName)
+    end
+
+    function ctx:appendToFile(path, line)
+        local resolved = expandPath(path)
+        if not resolved or resolved == "" then return false, "invalid path" end
+        if not ensureParentDir(resolved) then return false, "mkdir failed" end
+        local f = io.open(resolved, "a")
+        if not f then return false, "open failed" end
+        f:write(tostring(line or self.text or "") .. "\n")
+        f:close()
+        return true
+    end
+
+    function ctx:runShell(command, inputText)
+        if type(command) ~= "string" or command == "" then
+            return false, "", "invalid command", 1
+        end
+        local token = tostring(os.time()) .. "_" .. tostring(math.random(1000000))
+        local stdinPath = WHISPER_TMP .. "/action_stdin_" .. token .. ".txt"
+        writeFile(stdinPath, tostring(inputText or self.text or ""))
+        local output, ok, kind, rc = hs.execute(command .. " < " .. shellQuote(stdinPath), true)
+        os.remove(stdinPath)
+        return ok, output, kind, rc
+    end
+
+    function ctx:keystroke(mods, key)
+        hs.eventtap.keyStroke(mods or {}, key)
+    end
+
+    function ctx:notify(message)
+        hs.notify.new({ title = "local-whisper", informativeText = tostring(message) }):send()
+    end
+
+    function ctx:log(message)
+        log("action: " .. tostring(message))
+    end
+
+    return ctx
+end
+
+local function runActionList(actions, ctx)
+    if type(actions) ~= "table" then return end
+    for i, action in ipairs(actions) do
+        if ctx.handled then break end
+        if type(action) == "function" then
+            safeHookCall("actions[" .. i .. "]", action, ctx)
+        elseif type(action) == "table" and type(action.run) == "function" then
+            local name = action.name or ("actions[" .. i .. "]")
+            local shouldRun = true
+            if type(action.when) == "function" then
+                local ok, res = pcall(action.when, ctx)
+                if not ok then
+                    shouldRun = false
+                    log("actions: " .. name .. ".when failed: " .. tostring(res))
+                else
+                    shouldRun = not not res
+                end
+            elseif type(action.pattern) == "string" then
+                shouldRun = ctx.textLower:match(action.pattern) ~= nil
+            end
+            if shouldRun then
+                safeHookCall(name, action.run, ctx)
+            end
+        end
+    end
+end
+
+local function runPreInsertActions(ctx)
+    local cfg = loadActionConfig()
+    if type(cfg) ~= "table" then return end
+    if type(cfg.beforeInsert) == "function" then
+        safeHookCall("beforeInsert", cfg.beforeInsert, ctx)
+    end
+    if not ctx.handled then
+        runActionList(cfg.actions, ctx)
+    end
+end
+
+local function runPostInsertActions(ctx)
+    local cfg = loadActionConfig()
+    if type(cfg) ~= "table" then return end
+    if type(cfg.afterInsert) == "function" then
+        safeHookCall("afterInsert", cfg.afterInsert, ctx)
+    end
+end
+
+-- Global reload function (used by hotkey and menu bar)
+WhisperActions = WhisperActions or {}
+function WhisperActions.reload()
+    local cfg = reloadActionConfig()
+    if cfg then
+        hs.notify.new({ title = "local-whisper", informativeText = "Action hooks reloaded" }):send()
+    else
+        hs.notify.new({ title = "local-whisper", informativeText = "No action hook config found" }):send()
+    end
+end
+
 --------------------------------------------------------------------------------
 -- Overlay UI
 --------------------------------------------------------------------------------
@@ -219,8 +507,8 @@ local overlay = nil
 local btnColor = { red = 0.5, green = 0.8, blue = 1.0, alpha = 1.0 }
 local btnHover = { red = 0.7, green = 0.9, blue = 1.0, alpha = 1.0 }
 
--- Element indices: 1=bg, 2=lang, 3=sep1, 4=output, 5=sep2, 6=enter, 7=sep3, 8=model, 9=close, 10=text
-local EL = { lang = 2, output = 4, enter = 6, model = 8, close = 9, text = 10 }
+-- Element indices: 1=bg, 2=lang, 3=sep1, 4=output, 5=sep2, 6=enter, 7=sep3, 8=model, 9=close, 10=text, 11=dot, 12=timer
+local EL = { lang = 2, output = 4, enter = 6, model = 8, close = 9, text = 10, dot = 11, timer = 12 }
 
 local enterOnColor = { red = 0.3, green = 1.0, blue = 0.3, alpha = 1.0 }
 local enterOffColor = { red = 0.5, green = 0.5, blue = 0.5, alpha = 0.5 }
@@ -316,6 +604,20 @@ local function createOverlay()
         textColor = { red = 1, green = 1, blue = 1, alpha = 1.0 },
         textSize = 14,
         frame = { x = "5%", y = "35%", w = "90%", h = "60%" },
+    })
+    -- 11: Recording indicator (pulsing red dot)
+    overlay:appendElements({
+        id = "dot", type = "oval", action = "fill",
+        fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 0.0 },
+        frame = { x = "89%", y = "8%", w = "3%", h = "12%" },
+    })
+    -- 12: Elapsed time display
+    overlay:appendElements({
+        id = "timer", type = "text", text = "",
+        textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 0.0 },
+        textSize = 10,
+        frame = { x = "75%", y = "8%", w = "14%", h = "20%" },
+        textAlignment = "right",
     })
 
     overlay:level(hs.canvas.windowLevels.overlay)
@@ -415,6 +717,164 @@ local partialTimer = nil
 local partialBusy = false
 local lastChunkCount = 0
 
+-- Menu bar
+local menuBar = nil
+
+-- Recording indicator state
+local pulseTimer = nil
+local clockTimer = nil
+local recordingStartTime = 0
+local pulseAlpha = 1.0
+local pulseFading = true
+
+-- Undo state
+local lastInsertedText = nil
+
+-- Auto-stop state
+local silentChunkCount = 0
+local silenceTimer = nil
+local lastCheckedChunk = 0
+
+--------------------------------------------------------------------------------
+-- Menu bar status icon
+--------------------------------------------------------------------------------
+
+function updateMenuBar()
+    if not menuBar then return end
+    if isRecording then
+        menuBar:setTitle(hs.styledtext.new("●", {
+            color = { red = 1, green = 0.2, blue = 0.2 },
+            font = { size = 14 },
+        }))
+    else
+        menuBar:setTitle(hs.styledtext.new("🎙", { font = { size = 13 } }))
+    end
+end
+
+local function buildMenuBarMenu()
+    local items = {}
+
+    -- Current status
+    table.insert(items, { title = isRecording and "● Recording..." or "Idle", disabled = true })
+    table.insert(items, { title = "-" })
+
+    -- Language
+    local langDisplay = getLang():upper()
+    table.insert(items, {
+        title = "Language: " .. langDisplay,
+        fn = function() cycleLang(); updateMenuBar() end,
+    })
+
+    -- Model
+    table.insert(items, {
+        title = "Model: " .. getModelName(),
+        fn = function() cycleModel(); updateMenuBar() end,
+    })
+
+    -- Output mode
+    table.insert(items, {
+        title = "Output: " .. getOutputMode():upper(),
+        fn = function() cycleOutput(); updateMenuBar() end,
+    })
+
+    -- Enter mode
+    local enterState = getEnterMode() and "ON" or "OFF"
+    table.insert(items, {
+        title = "Enter after insert: " .. enterState,
+        fn = function() cycleEnter(); updateMenuBar() end,
+    })
+
+    -- Preferred langs
+    local preferred = table.concat(getPreferredLangs(), ", ")
+    table.insert(items, { title = "Preferred: " .. preferred, disabled = true })
+
+    table.insert(items, { title = "-" })
+
+    -- Settings overlay
+    table.insert(items, {
+        title = "Settings...",
+        fn = function()
+            if overlay then
+                forceHideOverlay()
+            else
+                showOverlay()
+                overlayPinned = true
+                overlay[1].fillColor = { red = 0.15, green = 0.15, blue = 0.2, alpha = 0.92 }
+                setOverlayText("Click labels to change settings")
+            end
+        end,
+    })
+
+    -- Reload actions
+    table.insert(items, {
+        title = "Reload Actions",
+        fn = function() WhisperActions.reload() end,
+    })
+
+    -- Emergency stop
+    table.insert(items, { title = "-" })
+    table.insert(items, {
+        title = "Emergency Stop",
+        fn = function() emergencyStop() end,
+    })
+
+    return items
+end
+
+local function createMenuBar()
+    menuBar = hs.menubar.new()
+    if not menuBar then return end
+    updateMenuBar()
+    menuBar:setMenu(buildMenuBarMenu)
+end
+
+--------------------------------------------------------------------------------
+-- Recording indicator (pulsing dot + timer)
+--------------------------------------------------------------------------------
+
+local function startRecordingIndicator()
+    if not overlay then return end
+    recordingStartTime = hs.timer.secondsSinceEpoch()
+    pulseAlpha = 1.0
+    pulseFading = true
+
+    -- Show dot and timer
+    overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 1.0 }
+    overlay[EL.timer].textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 1.0 }
+
+    -- Pulse the red dot
+    pulseTimer = hs.timer.doEvery(0.05, function()
+        if not overlay then return end
+        if pulseFading then
+            pulseAlpha = pulseAlpha - 0.03
+            if pulseAlpha <= 0.2 then pulseFading = false end
+        else
+            pulseAlpha = pulseAlpha + 0.03
+            if pulseAlpha >= 1.0 then pulseFading = true end
+        end
+        overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = pulseAlpha }
+    end)
+
+    -- Update elapsed time every second
+    clockTimer = hs.timer.doEvery(1, function()
+        if not overlay then return end
+        local elapsed = math.floor(hs.timer.secondsSinceEpoch() - recordingStartTime)
+        local min = math.floor(elapsed / 60)
+        local sec = elapsed % 60
+        overlay[EL.timer].text = string.format("%d:%02d", min, sec)
+    end)
+end
+
+local function stopRecordingIndicator()
+    if pulseTimer then pulseTimer:stop(); pulseTimer = nil end
+    if clockTimer then clockTimer:stop(); clockTimer = nil end
+    if overlay then
+        overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 0.0 }
+        overlay[EL.timer].textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 0.0 }
+        overlay[EL.timer].text = ""
+    end
+end
+
 --------------------------------------------------------------------------------
 -- Emergency stop (forward declaration)
 --------------------------------------------------------------------------------
@@ -423,10 +883,15 @@ function emergencyStop()
     log("emergency stop")
     isRecording = false
     if partialTimer then partialTimer:stop(); partialTimer = nil end
+    if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
+    stopRecordingIndicator()
     if ffmpegTask and ffmpegTask:isRunning() then ffmpegTask:interrupt() end
     ffmpegTask = nil
     partialBusy = false
+    silentChunkCount = 0
+    lastCheckedChunk = 0
     forceHideOverlay()
+    updateMenuBar()
     os.execute("killall whisper-cli 2>/dev/null")
     hs.notify.new({ title = "local-whisper", informativeText = "Stopped" }):send()
 end
@@ -465,6 +930,9 @@ local function doPartialTranscribe()
         local lang = getLang()
         -- In auto mode, use first preferred lang for speed during partial transcription
         if lang == "auto" then lang = getPreferredLangs()[1] end
+        local whisperArgs = { "-m", getPartialModelPath(), "-f", batchWav, "-l", lang, "-nt", "--no-prints" }
+        local promptArgs = getPromptArgs()
+        for _, a in ipairs(promptArgs) do table.insert(whisperArgs, a) end
         local whisperTask = hs.task.new(WHISPER_BIN, function(code2, out2)
             partialBusy = false
             lastChunkCount = completed
@@ -476,7 +944,7 @@ local function doPartialTranscribe()
                 setOverlayText(display)
                 log("partial: " .. text)
             end
-        end, { "-m", getModelPath(), "-f", batchWav, "-l", lang, "-nt", "--no-prints" })
+        end, whisperArgs)
         whisperTask:start()
     end, { "-y", "-f", "concat", "-safe", "0", "-i", batchList, "-c", "copy", batchWav })
     concatTask:start()
@@ -486,14 +954,8 @@ end
 -- Final transcription
 --------------------------------------------------------------------------------
 
--- Insert transcribed text at cursor, optionally press Enter, show in overlay
-local function insertTranscribedText(text, detectedLang)
-    if text == "" or isHallucination(text) then
-        hideOverlay()
-        return
-    end
-
-    local mode = getOutputMode()
+-- Low-level text insertion at cursor
+local function insertTextAtCursor(text, mode)
     if mode == "paste" then
         local oldClipboard = hs.pasteboard.getContents()
         hs.pasteboard.setContents(text)
@@ -504,15 +966,50 @@ local function insertTranscribedText(text, detectedLang)
     else
         hs.eventtap.keyStrokes(text)
     end
+end
 
-    -- Press Enter after insertion if enter mode is on
-    if getEnterMode() then
-        hs.timer.doAfter(0.15, function()
-            hs.eventtap.keyStroke({}, "return")
-        end)
+-- Insert transcribed text at cursor, with action hooks and app-aware processing
+local function insertTranscribedText(text, detectedLang)
+    if text == "" or isHallucination(text) then
+        hideOverlay()
+        return
     end
 
-    local display = text
+    -- Apply app-aware post-processing
+    text = postProcess(text, capturedAppBundleID)
+    if text == "" then hideOverlay(); return end
+
+    -- Build action context and run pre-insert hooks
+    local ctx = buildActionContext(normalizeText(text), detectedLang or getLang(), getOutputMode())
+    runPreInsertActions(ctx)
+
+    local finalText = normalizeText(ctx.text)
+    if finalText == "" then
+        log("final: empty text after actions")
+        hideOverlay()
+        return
+    end
+
+    if ctx.insert then
+        -- Track for undo
+        lastInsertedText = finalText
+        insertTextAtCursor(finalText, ctx.outputMode)
+        ctx.inserted = true
+
+        -- Press Enter after insertion if enter mode is on
+        if getEnterMode() then
+            hs.timer.doAfter(0.15, function()
+                hs.eventtap.keyStroke({}, "return")
+            end)
+        end
+    else
+        log("final: insertion disabled by action hooks")
+    end
+
+    ctx.text = finalText
+    runPostInsertActions(ctx)
+
+    local display = finalText
     if detectedLang then display = display .. " [" .. detectedLang:upper() .. "]" end
     setOverlayText(display)
     hs.sound.getByFile("/System/Library/Sounds/Glass.aiff"):play()
@@ -548,8 +1045,12 @@ local function doFinalTranscription()
             return
         end
 
+        local promptArgs = getPromptArgs()
+
         if lang == "auto" then
             -- Auto mode: run without --no-prints to capture detected language from stderr
+            local autoArgs = { "-m", getModelPath(), "-f", finalWav, "-l", "auto", "-nt" }
+            for _, a in ipairs(promptArgs) do table.insert(autoArgs, a) end
             local whisperTask = hs.task.new(WHISPER_BIN, function(code2, out2, err2)
                 if code2 ~= 0 then
                     log("final: whisper failed")
@@ -578,6 +1079,8 @@ local function doFinalTranscription()
                     local fallback = preferred[1]
                     log("auto-detect got '" .. tostring(detected) .. "', re-running with " .. fallback)
                     setOverlayText("Re-transcribing (" .. fallback:upper() .. ")...")
+                    local retryArgs = { "-m", getModelPath(), "-f", finalWav, "-l", fallback, "-nt", "--no-prints" }
+                    for _, a in ipairs(promptArgs) do table.insert(retryArgs, a) end
                     local retryTask = hs.task.new(WHISPER_BIN, function(code3, out3)
                         if code3 ~= 0 then
                             log("final: retry whisper failed")
@@ -588,13 +1091,15 @@ local function doFinalTranscription()
                         local text = (out3 or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
                         log("final (retry/" .. fallback .. "): '" .. text .. "'")
                         insertTranscribedText(text, fallback)
-                    end, { "-m", getModelPath(), "-f", finalWav, "-l", fallback, "-nt", "--no-prints" })
+                    end, retryArgs)
                     retryTask:start()
                 end
-            end, { "-m", getModelPath(), "-f", finalWav, "-l", "auto", "-nt" })
+            end, autoArgs)
             whisperTask:start()
         else
             -- Specific language mode
+            local langArgs = { "-m", getModelPath(), "-f", finalWav, "-l", lang, "-nt", "--no-prints" }
+            for _, a in ipairs(promptArgs) do table.insert(langArgs, a) end
             local whisperTask = hs.task.new(WHISPER_BIN, function(code2, out2)
                 if code2 ~= 0 then
                     log("final: whisper failed")
@@ -605,11 +1110,47 @@ local function doFinalTranscription()
                 local text = (out2 or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
                 log("final: '" .. text .. "'")
                 insertTranscribedText(text)
-            end, { "-m", getModelPath(), "-f", finalWav, "-l", lang, "-nt", "--no-prints" })
+            end, langArgs)
             whisperTask:start()
         end
     end, { "-y", "-f", "concat", "-safe", "0", "-i", concatFile, "-c", "copy", finalWav })
     concatTask:start()
+end
+
+--------------------------------------------------------------------------------
+-- Auto-stop on silence
+--------------------------------------------------------------------------------
+
+local function checkSilence()
+    if not isRecording then return end
+    local chunks = getChunkFiles()
+    local numChunks = #chunks
+    -- Only check completed chunks (not the one being written)
+    local completed = numChunks - 1
+    if completed <= lastCheckedChunk then return end
+
+    -- Check the latest completed chunk
+    local chunkPath = chunks[completed]
+    lastCheckedChunk = completed
+
+    local volTask = hs.task.new(FFMPEG, function(code, out, err)
+        if code ~= 0 or not isRecording then return end
+        local maxVol = (err or ""):match("max_volume:%s*([-%.%d]+)")
+        if maxVol then
+            maxVol = tonumber(maxVol)
+            if maxVol and maxVol < AUTO_STOP_THRESHOLD_DB then
+                silentChunkCount = silentChunkCount + 1
+                log("silence: chunk " .. completed .. " vol=" .. maxVol .. "dB (count=" .. silentChunkCount .. ")")
+                if silentChunkCount >= AUTO_STOP_SILENCE_SECONDS then
+                    log("auto-stop: " .. AUTO_STOP_SILENCE_SECONDS .. "s of silence")
+                    stopRecording()
+                end
+            else
+                silentChunkCount = 0
+            end
+        end
+    end, { "-i", chunkPath, "-af", "volumedetect", "-f", "null", "-" })
+    volTask:start()
 end
 
 --------------------------------------------------------------------------------
@@ -624,7 +1165,12 @@ local function startRecording()
     os.execute("rm -rf '" .. CHUNK_DIR .. "'")
     os.execute("mkdir -p '" .. CHUNK_DIR .. "'")
 
+    captureActiveApp()
+    log("recording: app=" .. tostring(capturedAppName) .. " (" .. tostring(capturedAppBundleID) .. ")")
+
     showOverlay()
+    startRecordingIndicator()
+    updateMenuBar()
     hs.sound.getByFile("/System/Library/Sounds/Pop.aiff"):play()
 
     ffmpegTask = hs.task.new(FFMPEG, function(code, out, err)
@@ -639,7 +1185,10 @@ local function startRecording()
 
     lastChunkCount = 0
     partialBusy = false
+    silentChunkCount = 0
+    lastCheckedChunk = 0
     partialTimer = hs.timer.doEvery(PARTIAL_INTERVAL, doPartialTranscribe)
+    silenceTimer = hs.timer.doEvery(1.0, checkSilence)
 end
 
 local function stopRecording()
@@ -648,7 +1197,13 @@ local function stopRecording()
     log("recording: stop")
 
     if partialTimer then partialTimer:stop(); partialTimer = nil end
+    if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
     partialBusy = false
+    silentChunkCount = 0
+    lastCheckedChunk = 0
+
+    stopRecordingIndicator()
+    updateMenuBar()
 
     if ffmpegTask and ffmpegTask:isRunning() then
         ffmpegTask:interrupt()
@@ -777,6 +1332,29 @@ hs.hotkey.bind({"ctrl", "alt"}, "return", function()
 end)
 
 --------------------------------------------------------------------------------
+-- Action reload hotkey (Ctrl+Alt+R)
+--------------------------------------------------------------------------------
+
+hs.hotkey.bind({"ctrl", "alt"}, "R", function()
+    WhisperActions.reload()
+end)
+
+--------------------------------------------------------------------------------
+-- Undo last dictation (Ctrl+Alt+Z)
+--------------------------------------------------------------------------------
+
+hs.hotkey.bind({"ctrl", "alt"}, "Z", function()
+    if lastInsertedText then
+        hs.eventtap.keyStroke({"cmd"}, "z")
+        log("undo: '" .. lastInsertedText .. "'")
+        lastInsertedText = nil
+        hs.notify.new({ title = "local-whisper", informativeText = "Undone" }):send()
+    else
+        hs.notify.new({ title = "local-whisper", informativeText = "Nothing to undo" }):send()
+    end
+end)
+
+--------------------------------------------------------------------------------
 -- Emergency stop hotkey (Ctrl+Alt+X)
 --------------------------------------------------------------------------------
 
@@ -797,9 +1375,17 @@ if readFile(PREFERRED_LANGS_FILE) == "" then
     writeFile(PREFERRED_LANGS_FILE, "en,pt")
 end
 
+-- Create menu bar icon
+createMenuBar()
+
+-- Load action hooks
+local actionsEnabled = loadActionConfig() ~= nil
+log("actions: " .. (actionsEnabled and "enabled" or "disabled"))
+
 local enterStatus = getEnterMode() and "⏎" or ""
+local actionsFlag = actionsEnabled and " +actions" or ""
 log("loaded (trigger=" .. TRIGGER_KEY .. ", lang=" .. getLang() .. ", output=" .. getOutputMode() .. ", model=" .. getModelName() .. ", preferred=" .. table.concat(getPreferredLangs(), ",") .. ")")
 hs.notify.new({
     title = "local-whisper",
-    informativeText = "Loaded (" .. getLang():upper() .. " / " .. getOutputMode():upper() .. enterStatus .. " / " .. getModelName() .. ") — hold " .. TRIGGER_KEY
+    informativeText = "Loaded (" .. getLang():upper() .. " / " .. getOutputMode():upper() .. enterStatus .. " / " .. getModelName() .. actionsFlag .. ") — hold " .. TRIGGER_KEY
 }):send()
