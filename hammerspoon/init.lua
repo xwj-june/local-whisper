@@ -13,11 +13,15 @@ local TMPDIR = os.getenv("TMPDIR") or "/tmp"
 local WHISPER_TMP = TMPDIR .. "/whisper-dictate"
 local CHUNK_DIR = WHISPER_TMP .. "/chunks"
 
+-- Config directory (all user settings live here)
+local CONFIG_DIR = HOME .. "/.local-whisper"
+os.execute("mkdir -p '" .. CONFIG_DIR .. "'")
+
 -- External binaries (absolute paths)
 local FFMPEG = "/opt/homebrew/bin/ffmpeg"
 local WHISPER_BIN = HOME .. "/whisper.cpp/build/bin/whisper-cli"
 local MODELS_DIR = HOME .. "/whisper.cpp/models"
-local MODEL_FILE = HOME .. "/.whisper_dictation_model"
+local MODEL_FILE = CONFIG_DIR .. "/model"
 
 -- Scan available models
 local function getAvailableModels()
@@ -56,15 +60,14 @@ local AUDIO_DEVICE = ":1"
 -- Trigger key: "rightAlt", "rightCmd", "rightCtrl"
 local TRIGGER_KEY = "rightCmd"
 
--- User preference files
-local LANG_FILE = HOME .. "/.whisper_dictation_lang"
-local OUTPUT_FILE = HOME .. "/.whisper_dictation_output"
-local PREFERRED_LANGS_FILE = HOME .. "/.whisper_dictation_preferred_langs"
-local ENTER_FILE = HOME .. "/.whisper_dictation_enter"
+-- User preference files (all in CONFIG_DIR)
+local LANG_FILE = CONFIG_DIR .. "/lang"
+local OUTPUT_FILE = CONFIG_DIR .. "/output"
+local PREFERRED_LANGS_FILE = CONFIG_DIR .. "/preferred_langs"
+local ENTER_FILE = CONFIG_DIR .. "/enter"
+local PROMPT_FILE = CONFIG_DIR .. "/prompt"
+local RECENT_FILE = CONFIG_DIR .. "/recent.json"
 local LOG_FILE = WHISPER_TMP .. "/whisper-dictate.log"
-
--- Custom vocabulary prompt file
-local PROMPT_FILE = HOME .. "/.whisper_dictation_prompt"
 
 -- Action hooks config
 local ACTIONS_FILE = HOME .. "/.hammerspoon/local_whisper_actions.lua"
@@ -730,6 +733,27 @@ local pulseFading = true
 -- Undo state
 local lastInsertedText = nil
 
+-- Recent dictations (newest first, max 10)
+local MAX_RECENT = 10
+
+local function loadRecentDictations()
+    local f = io.open(RECENT_FILE, "r")
+    if not f then return {} end
+    local data = f:read("*a"); f:close()
+    local ok, result = pcall(hs.json.decode, data)
+    if ok and type(result) == "table" then return result end
+    return {}
+end
+
+local function saveRecentDictations()
+    local ok, json = pcall(hs.json.encode, recentDictations, true)
+    if not ok then return end
+    local f = io.open(RECENT_FILE, "w")
+    if f then f:write(json); f:close() end
+end
+
+local recentDictations = loadRecentDictations()
+
 -- Auto-stop state
 local silentChunkCount = 0
 local silenceTimer = nil
@@ -830,6 +854,33 @@ local function buildMenuBarMenu()
             end
         end,
     })
+
+    -- Recent dictations
+    if #recentDictations > 0 then
+        table.insert(items, { title = "-" })
+        table.insert(items, { title = "Recent Dictations", disabled = true })
+        for _, entry in ipairs(recentDictations) do
+            local ago = os.time() - entry.time
+            local timeStr
+            if ago < 60 then timeStr = "just now"
+            elseif ago < 3600 then timeStr = math.floor(ago / 60) .. "m ago"
+            else timeStr = math.floor(ago / 3600) .. "h ago"
+            end
+            local preview = entry.text
+            if #preview > 40 then preview = preview:sub(1, 37) .. "..." end
+            local icon = entry.inserted and "⏎" or "⚡"
+            table.insert(items, {
+                title = icon .. " " .. preview .. "  " .. timeStr,
+                fn = function()
+                    hs.pasteboard.setContents(entry.text)
+                    hs.eventtap.keyStroke({"cmd"}, "v")
+                    hs.notify.new({ title = "Pasted", informativeText = entry.text }):send()
+                end,
+            })
+        end
+    end
+
+    table.insert(items, { title = "-" })
 
     -- Reload actions
     table.insert(items, {
@@ -1036,6 +1087,18 @@ local function insertTranscribedText(text, detectedLang)
 
     ctx.text = finalText
     runPostInsertActions(ctx)
+
+    -- Track in recent dictations
+    table.insert(recentDictations, 1, {
+        text = ctx.originalText,
+        time = os.time(),
+        inserted = ctx.inserted,
+        app = capturedAppName or "?",
+    })
+    while #recentDictations > MAX_RECENT do
+        table.remove(recentDictations)
+    end
+    saveRecentDictations()
 
     local display = finalText
     if detectedLang then display = display .. " [" .. detectedLang:upper() .. "]" end

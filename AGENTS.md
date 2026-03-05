@@ -26,8 +26,7 @@ Karabiner (Right Option hold/release)
 - `$TMPDIR/whisper-dictate/partial.txt` — live partial transcript
 - `$TMPDIR/whisper-dictate/final.txt` — final transcript
 - `$TMPDIR/whisper-dictate/recording.pid` — ffmpeg PID lock
-- `~/.whisper_dictation_lang` — language state (en|pt|auto)
-- `~/.whisper_dictation_output` — output mode (paste|type)
+- `~/.local-whisper/` — all user settings (lang, model, output, prompt, recent dictations)
 
 ## Conventions
 

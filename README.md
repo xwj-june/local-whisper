@@ -126,7 +126,7 @@ A persistent menu bar icon (🎙) shows recording status (turns red ● when rec
 
 ## Custom vocabulary prompt
 
-Create `~/.whisper_dictation_prompt` with terms whisper should recognize better:
+Create `~/.local-whisper/prompt` with terms whisper should recognize better:
 
 ```
 Claude, Hammerspoon, whisper.cpp, Karabiner, ffmpeg, macOS, Lua, Anthropic
