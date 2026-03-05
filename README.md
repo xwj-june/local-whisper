@@ -150,7 +150,7 @@ This is passed as `--prompt` to whisper-cli for both partial and final transcrip
 If you have [Ollama](https://ollama.com) installed, you can enable LLM-powered text cleanup. After transcription, the text is sent to a local LLM that fixes punctuation, removes filler words, and formats numbered lists — all on-device.
 
 1. Install Ollama: `brew install ollama`
-2. Pull a model: `ollama pull llama3.1:8b`
+2. Pull a model: `ollama pull gemma3:4b` (small, fast, good at text cleanup)
 3. Start Ollama: `ollama serve` (or `brew services start ollama`)
 4. Toggle in the menu bar or click **refine** in the overlay
 
@@ -161,7 +161,7 @@ Refinement only runs on text longer than 50 characters. Short dictations are ins
 | File | What it does |
 |------|-------------|
 | `~/.local-whisper/refine` | ON/OFF state (also togglable from menu bar / overlay) |
-| `~/.local-whisper/refine_model` | Ollama model to use (default: `llama3.1:8b`) |
+| `~/.local-whisper/refine_model` | Ollama model to use (default: `gemma3:4b`) |
 | `~/.local-whisper/refine_prompt` | Custom instructions for the LLM |
 
 ## Faster live preview
