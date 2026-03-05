@@ -309,6 +309,7 @@ local function refineWithOllama(text, callback)
         "-H", "Content-Type: application/json",
         "-d", "@" .. tmpPayload,
     })
+    task:setEnvironment({ HOME = HOME, PATH = "/usr/bin:/bin" })
     task:start()
 end
 
