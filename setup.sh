@@ -107,8 +107,30 @@ elif [[ -x "/opt/homebrew/bin/hs" ]]; then
     HS_BIN="/opt/homebrew/bin/hs"
 fi
 
+# Helper: run command with a timeout (macOS has no `timeout` by default)
+run_with_timeout() {
+    local secs="$1"; shift
+    "$@" &
+    local pid=$!
+    ( sleep "$secs" && kill "$pid" 2>/dev/null ) &
+    local watchdog=$!
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    kill "$watchdog" 2>/dev/null
+    wait "$watchdog" 2>/dev/null
+    return $rc
+}
+
+check_accessibility() {
+    [[ -n "$HS_BIN" ]] && run_with_timeout 5 "$HS_BIN" -c "return hs.accessibilityState()" 2>/dev/null | grep -q "true"
+}
+
+check_microphone() {
+    [[ -n "$FFMPEG_BIN" ]] && run_with_timeout 5 "$FFMPEG_BIN" -f avfoundation -i ":default" -t 0.1 -f null - 2>/dev/null
+}
+
 # ── Accessibility (Hammerspoon) ──
-if [[ -n "$HS_BIN" ]] && "$HS_BIN" -c "return hs.accessibilityState()" 2>/dev/null | grep -q "true"; then
+if check_accessibility; then
     ok "Accessibility: granted (Hammerspoon)"
 else
     ALL_OK=false
@@ -117,7 +139,7 @@ else
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" 2>/dev/null || true
     read -r -p "  Press Enter when done..."
 
-    if [[ -n "$HS_BIN" ]] && "$HS_BIN" -c "return hs.accessibilityState()" 2>/dev/null | grep -q "true"; then
+    if check_accessibility; then
         ok "Accessibility: granted"
     else
         warn "Accessibility: could not verify — make sure Hammerspoon is enabled"
@@ -125,7 +147,7 @@ else
 fi
 
 # ── Microphone ──
-if [[ -n "$FFMPEG_BIN" ]] && "$FFMPEG_BIN" -f avfoundation -i ":default" -t 0.1 -f null - 2>/dev/null; then
+if check_microphone; then
     ok "Microphone: granted"
 else
     ALL_OK=false
@@ -134,7 +156,7 @@ else
     open "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" 2>/dev/null || true
     read -r -p "  Press Enter when done..."
 
-    if [[ -n "$FFMPEG_BIN" ]] && "$FFMPEG_BIN" -f avfoundation -i ":default" -t 0.1 -f null - 2>/dev/null; then
+    if check_microphone; then
         ok "Microphone: granted"
     else
         warn "Microphone: could not verify — you may need to restart Hammerspoon"
@@ -184,7 +206,7 @@ fi
 
 # Reload Hammerspoon config
 if [[ -n "$HS_BIN" ]]; then
-    "$HS_BIN" -c "hs.reload()" 2>/dev/null && ok "Hammerspoon config reloaded" || warn "Could not reload — click the Hammerspoon menu bar icon > Reload Config"
+    run_with_timeout 5 "$HS_BIN" -c "hs.reload()" 2>/dev/null && ok "Hammerspoon config reloaded" || warn "Could not reload — click the Hammerspoon menu bar icon > Reload Config"
 else
     warn "Reload Hammerspoon manually: click menu bar icon > Reload Config"
 fi
