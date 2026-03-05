@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install.sh — local-whisper installer
 # Sets up everything needed for hold-to-dictate on macOS with whisper.cpp
+# Architecture: Hammerspoon-only (no Karabiner, no bash scripts at runtime)
 set -euo pipefail
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
@@ -21,14 +22,13 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── Configurable paths ─────────────────────────────────────────────────────
 WHISPER_CPP_DIR="$HOME/whisper.cpp"
-WHISPER_DICTATE_DIR="$HOME/whisper-dictate"
 WHISPER_MODEL="medium"
 HAMMERSPOON_DIR="$HOME/.hammerspoon"
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
 echo ""
 echo -e "${BOLD}local-whisper installer${NC}"
-echo -e "Hold Right Option → speak → release → text at cursor"
+echo -e "Hold a key → speak → release → text at cursor"
 echo ""
 
 # Check macOS
@@ -54,7 +54,7 @@ ok "Homebrew found"
 
 # ─── Step 1: Brew dependencies ──────────────────────────────────────────────
 echo ""
-info "Step 1/6: Installing dependencies via Homebrew..."
+info "Step 1/5: Installing dependencies via Homebrew..."
 
 BREW_FORMULAE=(ffmpeg cmake git)
 for formula in "${BREW_FORMULAE[@]}"; do
@@ -67,23 +67,17 @@ for formula in "${BREW_FORMULAE[@]}"; do
     fi
 done
 
-BREW_CASKS=(karabiner-elements hammerspoon)
-# Heads up: Karabiner-Elements installs a system-level keyboard daemon
-# and will prompt for your macOS password during install. This is normal.
-warn "Karabiner-Elements may ask for your macOS password (it installs a system keyboard daemon)"
-for cask in "${BREW_CASKS[@]}"; do
-    if brew list --cask "$cask" &>/dev/null; then
-        ok "$cask already installed"
-    else
-        info "Installing $cask..."
-        brew install --cask "$cask"
-        ok "$cask installed"
-    fi
-done
+if brew list --cask hammerspoon &>/dev/null; then
+    ok "hammerspoon already installed"
+else
+    info "Installing hammerspoon..."
+    brew install --cask hammerspoon
+    ok "hammerspoon installed"
+fi
 
 # ─── Step 2: Build whisper.cpp ───────────────────────────────────────────────
 echo ""
-info "Step 2/6: Building whisper.cpp..."
+info "Step 2/5: Building whisper.cpp..."
 
 if [[ -x "$WHISPER_CPP_DIR/build/bin/whisper-cli" ]]; then
     ok "whisper-cli already built at $WHISPER_CPP_DIR/build/bin/whisper-cli"
@@ -109,13 +103,13 @@ else
     fi
 fi
 
-# ─── Step 3: Download model ─────────────────────────────────────────────────
+# ─── Step 3: Download models ────────────────────────────────────────────────
 echo ""
-info "Step 3/6: Downloading whisper model ($WHISPER_MODEL)..."
+info "Step 3/5: Downloading whisper models..."
 
 MODEL_FILE="$WHISPER_CPP_DIR/models/ggml-${WHISPER_MODEL}.bin"
 if [[ -f "$MODEL_FILE" ]]; then
-    ok "Model already downloaded: $MODEL_FILE"
+    ok "Model already downloaded: ggml-${WHISPER_MODEL}.bin"
 else
     info "Downloading ggml-${WHISPER_MODEL}.bin (~1.5 GB)..."
     cd "$WHISPER_CPP_DIR"
@@ -130,80 +124,54 @@ else
     fi
 fi
 
-# ─── Step 4: Install scripts ────────────────────────────────────────────────
-echo ""
-info "Step 4/6: Installing scripts to $WHISPER_DICTATE_DIR..."
+# Also download tiny model for faster live preview (~75 MB)
+TINY_MODEL="$WHISPER_CPP_DIR/models/ggml-tiny.bin"
+if [[ -f "$TINY_MODEL" ]]; then
+    ok "Tiny model already downloaded (used for fast live preview)"
+else
+    info "Downloading ggml-tiny.bin for faster live preview (~75 MB)..."
+    cd "$WHISPER_CPP_DIR"
+    bash ./models/download-ggml-model.sh tiny
+    cd "$SCRIPT_DIR"
 
-mkdir -p "$WHISPER_DICTATE_DIR"
-
-# Copy scripts from repo (or they may already be there)
-for script in config.sh start_record.sh stop_transcribe.sh partial_transcribe.sh; do
-    if [[ -f "$SCRIPT_DIR/scripts/$script" ]]; then
-        cp "$SCRIPT_DIR/scripts/$script" "$WHISPER_DICTATE_DIR/$script"
-        chmod +x "$WHISPER_DICTATE_DIR/$script"
-        ok "Installed $script"
-    elif [[ -f "$WHISPER_DICTATE_DIR/$script" ]]; then
-        ok "$script already in place"
+    if [[ -f "$TINY_MODEL" ]]; then
+        ok "Tiny model downloaded"
     else
-        error "$script not found in repo or $WHISPER_DICTATE_DIR"
-        exit 1
+        warn "Tiny model download failed — live preview will use main model (slower but works)"
     fi
-done
-
-# ─── Audio device ────────────────────────────────────────────────────────────
-echo ""
-ok "Audio device set to system default (follows System Settings > Sound > Input)"
-info "Available devices on this machine:"
-
-FFMPEG_BIN="$(brew --prefix)/bin/ffmpeg"
-DEVICE_LIST=$("$FFMPEG_BIN" -f avfoundation -list_devices true -i "" 2>&1 || true)
-echo "$DEVICE_LIST" | grep -A 100 "AVFoundation audio devices:" | grep -E "^\[AVFoundation" | head -10
-
-echo ""
-info "To pin a specific device, edit ~/whisper-dictate/config.sh and change AUDIO_DEVICE"
-
-# ─── Update paths in config.sh ──────────────────────────────────────────────
-# Ensure whisper binary and model paths match this system
-if [[ -f "$WHISPER_DICTATE_DIR/config.sh" ]]; then
-    FFMPEG_PATH="$(which ffmpeg)"
-    sed -i '' "s|FFMPEG=.*|FFMPEG=\"${FFMPEG_PATH}\"|" "$WHISPER_DICTATE_DIR/config.sh"
-    sed -i '' "s|WHISPER_BIN=.*|WHISPER_BIN=\"${WHISPER_CPP_DIR}/build/bin/whisper-cli\"|" "$WHISPER_DICTATE_DIR/config.sh"
-    sed -i '' "s|WHISPER_MODEL=.*|WHISPER_MODEL=\"${MODEL_FILE}\"|" "$WHISPER_DICTATE_DIR/config.sh"
-    ok "Paths updated in config.sh"
 fi
 
-# ─── Step 5: Install Hammerspoon config ─────────────────────────────────────
+# ─── Step 4: Install Hammerspoon config ─────────────────────────────────────
 echo ""
-info "Step 5/6: Setting up Hammerspoon..."
+info "Step 4/5: Setting up Hammerspoon..."
 
 mkdir -p "$HAMMERSPOON_DIR"
 
 if [[ -f "$HAMMERSPOON_DIR/init.lua" ]]; then
-    # Check if it already has our module
-    if grep -q "WhisperOverlay" "$HAMMERSPOON_DIR/init.lua"; then
-        ok "Hammerspoon already configured with WhisperOverlay"
+    if grep -q "local-whisper" "$HAMMERSPOON_DIR/init.lua"; then
+        ok "Hammerspoon already configured with local-whisper"
     else
         warn "Existing init.lua found — backing up to init.lua.backup"
         cp "$HAMMERSPOON_DIR/init.lua" "$HAMMERSPOON_DIR/init.lua.backup"
-        if [[ -f "$SCRIPT_DIR/hammerspoon/init.lua" ]]; then
-            cp "$SCRIPT_DIR/hammerspoon/init.lua" "$HAMMERSPOON_DIR/init.lua"
-            ok "Hammerspoon config installed (backup saved)"
-        fi
+        cp "$SCRIPT_DIR/hammerspoon/init.lua" "$HAMMERSPOON_DIR/init.lua"
+        ok "Hammerspoon config installed (backup saved)"
     fi
 else
-    if [[ -f "$SCRIPT_DIR/hammerspoon/init.lua" ]]; then
-        cp "$SCRIPT_DIR/hammerspoon/init.lua" "$HAMMERSPOON_DIR/init.lua"
-        ok "Hammerspoon config installed"
-    elif [[ -f "$HAMMERSPOON_DIR/init.lua" ]]; then
-        ok "Hammerspoon config already in place"
-    else
-        error "Hammerspoon init.lua not found in repo"
-        exit 1
+    cp "$SCRIPT_DIR/hammerspoon/init.lua" "$HAMMERSPOON_DIR/init.lua"
+    ok "Hammerspoon config installed"
+fi
+
+# Mention example actions file
+if [[ ! -f "$HAMMERSPOON_DIR/local_whisper_actions.lua" ]]; then
+    if [[ -f "$SCRIPT_DIR/hammerspoon/local_whisper_actions.example.lua" ]]; then
+        echo ""
+        info "Tip: to enable voice commands (note-taking, app launching, etc.):"
+        echo -e "  cp ${SCRIPT_DIR}/hammerspoon/local_whisper_actions.example.lua ${HAMMERSPOON_DIR}/local_whisper_actions.lua"
     fi
 fi
 
-# ─── Step 6: Setup (permissions, shortcut, Karabiner activation, HS CLI) ────
+# ─── Step 5: Setup (permissions, trigger key, audio device, HS CLI) ─────────
 echo ""
-info "Step 6/6: Running setup (permissions, shortcut config, activation)..."
+info "Step 5/5: Running setup (permissions, trigger key, audio device)..."
 echo ""
 bash "$SCRIPT_DIR/setup.sh"
