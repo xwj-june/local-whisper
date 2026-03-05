@@ -595,8 +595,9 @@ local function refreshOverlayLabels()
     overlay[EL.enter].text = "⏎"
     overlay[EL.enter].textColor = getEnterMode() and enterOnColor or enterOffColor
     overlay[EL.model].text = getModelName()
-    overlay[EL.refine].text = "LLM"
-    overlay[EL.refine].textColor = (getRefineMode() and hasOllama()) and refineOnColor or refineOffColor
+    local refineOn = getRefineMode() and hasOllama()
+    overlay[EL.refine].text = refineOn and "refine ✓" or "refine ✗"
+    overlay[EL.refine].textColor = refineOn and refineOnColor or refineOffColor
 end
 
 local function createOverlay()
@@ -675,10 +676,11 @@ local function createOverlay()
     })
     -- 10: LLM refine toggle
     overlay:appendElements({
-        id = "refine", type = "text", text = "LLM",
+        id = "refine", type = "text",
+        text = (getRefineMode() and hasOllama()) and "refine ✓" or "refine ✗",
         textColor = (getRefineMode() and hasOllama()) and refineOnColor or refineOffColor,
         textSize = 11,
-        frame = { x = "57%", y = "6%", w = "12%", h = "25%" },
+        frame = { x = "57%", y = "6%", w = "18%", h = "25%" },
         trackMouseUp = true, trackMouseEnterExit = true,
     })
     -- 11: Transcript text
