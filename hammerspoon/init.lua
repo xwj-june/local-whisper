@@ -80,7 +80,7 @@ local AUTO_STOP_THRESHOLD_DB = -40
 local REFINE_FILE = CONFIG_DIR .. "/refine"
 local REFINE_PROMPT_FILE = CONFIG_DIR .. "/refine_prompt"
 local REFINE_MODEL_FILE = CONFIG_DIR .. "/refine_model"
-local REFINE_DEFAULT_MODEL = "llama3.1:8b"
+local REFINE_DEFAULT_MODEL = "gemma3:4b"
 local REFINE_MIN_CHARS = 50  -- skip refinement for short text
 local REFINE_DEFAULT_PROMPT = "You are a text cleanup tool. Your ONLY job is to output the cleaned version of the input text. Rules: fix punctuation and capitalization, remove filler words (um, uh, like, you know, so, well, I mean), format numbered lists with newlines. NEVER start with phrases like 'Here is', 'Here's', 'The cleaned text', 'Sure', etc. Just output the text directly. Nothing before it, nothing after it."
 
@@ -1430,9 +1430,6 @@ local function startRecording()
     log("recording: app=" .. tostring(capturedAppName) .. " (" .. tostring(capturedAppBundleID) .. ")")
 
     showOverlay()
-    if getRefineMode() and hasOllama() then
-        setOverlayText("Listening... (LLM refine ON)")
-    end
     startRecordingIndicator()
     updateMenuBar()
     hs.sound.getByFile("/System/Library/Sounds/Pop.aiff"):play()
