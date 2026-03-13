@@ -55,7 +55,13 @@ local function getModelPath()
 end
 
 -- Audio device: ":default" for system default, ":0", ":1" etc. for specific
+-- Note: avfoundation requires colon prefix for audio-only (":0" not "0")
 local AUDIO_DEVICE = ":default"
+
+-- Auto-fix missing colon prefix (common setup mistake)
+if AUDIO_DEVICE ~= ":default" and not AUDIO_DEVICE:match("^:") then
+    AUDIO_DEVICE = ":" .. AUDIO_DEVICE
+end
 
 -- Trigger key: "rightAlt", "rightCmd", "rightCtrl"
 local TRIGGER_KEY = "rightCmd"
@@ -1436,6 +1442,9 @@ local function startRecording()
 
     ffmpegTask = hs.task.new(FFMPEG, function(code, out, err)
         log("recording: ffmpeg exited " .. tostring(code))
+        if code == 251 or code == 1 then
+            log("recording: ERROR — ffmpeg failed to open audio device '" .. AUDIO_DEVICE .. "'. Check device format (should be :default, :0, :1) and microphone permissions.")
+        end
     end, {
         "-f", "avfoundation", "-i", AUDIO_DEVICE,
         "-ac", "1", "-ar", "16000",

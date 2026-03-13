@@ -86,9 +86,14 @@ read -r -p "  Device [${CURRENT_DEVICE}]: " NEW_DEVICE
 NEW_DEVICE="${NEW_DEVICE:-$CURRENT_DEVICE}"
 
 if [[ "$NEW_DEVICE" != "$CURRENT_DEVICE" ]]; then
+    # Auto-fix missing colon prefix (common mistake: "0" instead of ":0")
+    if [[ "$NEW_DEVICE" =~ ^[0-9]+$ ]]; then
+        NEW_DEVICE=":${NEW_DEVICE}"
+        warn "Added colon prefix → $NEW_DEVICE (avfoundation requires ':' for audio devices)"
+    fi
     # Validate device format (colon + digits or :default)
     if [[ ! "$NEW_DEVICE" =~ ^:[0-9]+$ ]] && [[ "$NEW_DEVICE" != ":default" ]]; then
-        warn "Unusual device format: $NEW_DEVICE (expected :0, :1, :default)"
+        warn "Unusual device format: $NEW_DEVICE (expected :default, :0, :1)"
     fi
     # Escape special chars for sed
     ESCAPED_DEVICE=$(printf '%s\n' "$NEW_DEVICE" | sed 's/[&/\]/\\&/g')

@@ -246,9 +246,11 @@ local AUTO_STOP_THRESHOLD_DB = -40
 ## Troubleshooting
 
 - **No transcription output**: Check `$TMPDIR/whisper-dictate/whisper-dictate.log` for errors (run `echo $TMPDIR` to find the path)
-- **Wrong microphone**: Run `ffmpeg -f avfoundation -list_devices true -i ""` and update `AUDIO_DEVICE` in init.lua
+- **ffmpeg exits immediately (code 251)**: `AUDIO_DEVICE` is missing the colon prefix — use `:0` not `0`. The `:` tells avfoundation it's an audio device.
+- **Wrong microphone**: Run `ffmpeg -f avfoundation -list_devices true -i ""` and update `AUDIO_DEVICE` in init.lua (or use `:default`)
+- **Trigger key does nothing**: Accessibility permission may need toggling. Go to System Settings > Privacy & Security > Accessibility, toggle Hammerspoon **OFF then ON**, then run `hs.reload()` in the Hammerspoon console
+- **External keyboard mapping**: Some keyboards (e.g., Logitech MX Keys) send non-standard modifier flags. Try different `TRIGGER_KEY` values (`rightAlt`, `rightCmd`, `rightCtrl`) in init.lua
 - **`hs` command not found**: Run `hs.ipc.cliInstall()` in Hammerspoon console
-- **Permissions errors**: Ensure Hammerspoon has Accessibility and Microphone permissions in System Settings
 - **Voice commands not triggering**: Check the log to see what whisper transcribed — add command words to `~/.local-whisper/prompt`
 - **Overlay not appearing**: Hammerspoon may need Accessibility permission re-granted after updates
 
