@@ -1961,6 +1961,7 @@ startMeeting = function()
         "-segment_format", "wav",
         meetingChunkDir .. "/chunk_%04d.wav"
     })
+    meetingFfmpegTask:setEnvironment({ HOME = HOME, PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" })
     meetingFfmpegTask:start()
 
     -- Periodically check for new chunks and transcribe
