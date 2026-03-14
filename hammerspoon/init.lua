@@ -947,6 +947,11 @@ function updateMenuBar()
     end
 end
 
+-- Forward-declare meeting state and functions (defined in Meeting mode section below)
+local meetingRecording = false
+local meetingStartTime = nil
+local startMeeting, stopMeeting
+
 local function buildMenuBarMenu()
     local items = {}
 
@@ -997,6 +1002,23 @@ local function buildMenuBarMenu()
     -- Preferred langs
     local preferred = table.concat(getPreferredLangs(), ", ")
     table.insert(items, { title = "Preferred: " .. preferred, disabled = true })
+
+    table.insert(items, { title = "-" })
+
+    -- Meeting mode
+    if meetingRecording then
+        local elapsed = hs.timer.secondsSinceEpoch() - (meetingStartTime or 0)
+        local mins = math.floor(elapsed / 60)
+        table.insert(items, {
+            title = "⏹ Stop Meeting Notes (" .. mins .. "m)",
+            fn = function() stopMeeting() end,
+        })
+    else
+        table.insert(items, {
+            title = "🎙 Start Meeting Notes",
+            fn = function() startMeeting() end,
+        })
+    end
 
     table.insert(items, { title = "-" })
 
@@ -1536,6 +1558,471 @@ hs.timer.doEvery(5, function()
         modTap:start()
     end
 end)
+
+--------------------------------------------------------------------------------
+-- Meeting mode
+--------------------------------------------------------------------------------
+
+local MEETINGS_DIR = CONFIG_DIR .. "/meetings"
+local MEETING_CHUNK_SECONDS = 30
+-- meetingRecording and meetingStartTime are forward-declared before buildMenuBarMenu
+local meetingFfmpegTask = nil
+local meetingChunkDir = WHISPER_TMP .. "/meeting_chunks"
+local meetingTranscript = {}
+local meetingNotepad = nil
+local meetingTranscribeTimer = nil
+local meetingChunkIndex = 0
+
+-- Check if BlackHole virtual audio driver is installed
+local function hasBlackHole()
+    local bh = hs.audiodevice.findInputByName("BlackHole 2ch")
+    return bh ~= nil
+end
+
+-- Get BlackHole device string for ffmpeg (audio-only via avfoundation)
+local function getBlackHoleDevice()
+    local devices = hs.audiodevice.allInputDevices()
+    for _, dev in ipairs(devices) do
+        if dev:name() == "BlackHole 2ch" then
+            return ":BlackHole 2ch"
+        end
+    end
+    return nil
+end
+
+-- Show BlackHole setup instructions
+local function showBlackHoleSetup()
+    local msg = "Meeting mode requires BlackHole (free virtual audio driver).\n\n"
+        .. "Step 1: Install BlackHole\n"
+        .. "  brew install blackhole-2ch\n"
+        .. "  (Reboot after install)\n\n"
+        .. "Step 2: Create Multi-Output Device\n"
+        .. "  1. Open Audio MIDI Setup (Spotlight → 'Audio MIDI')\n"
+        .. "  2. Click '+' at bottom left → Create Multi-Output Device\n"
+        .. "  3. Check both your speakers/headphones AND BlackHole 2ch\n"
+        .. "  4. Set this Multi-Output as your system output\n\n"
+        .. "This routes audio to both your ears and BlackHole for recording."
+    hs.dialog.blockAlert("Meeting Mode Setup", msg, "OK")
+end
+
+-- Notepad HTML
+local function meetingNotepadHTML(meetingTitle)
+    return [[<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
+    }
+    .header {
+        padding: 10px 14px;
+        background: #16213e;
+        border-bottom: 1px solid #0f3460;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-shrink: 0;
+    }
+    .header h2 {
+        font-size: 13px;
+        color: #e94560;
+        font-weight: 600;
+    }
+    .timer {
+        font-size: 12px;
+        color: #888;
+        font-family: monospace;
+    }
+    .tabs {
+        display: flex;
+        background: #16213e;
+        border-bottom: 1px solid #0f3460;
+        flex-shrink: 0;
+    }
+    .tab {
+        padding: 6px 14px;
+        font-size: 12px;
+        cursor: pointer;
+        color: #888;
+        border-bottom: 2px solid transparent;
+    }
+    .tab.active {
+        color: #e94560;
+        border-bottom-color: #e94560;
+    }
+    .tab:hover { color: #ccc; }
+    .panel {
+        flex: 1;
+        display: none;
+        overflow: hidden;
+    }
+    .panel.active { display: flex; flex-direction: column; }
+    #notes {
+        flex: 1;
+        background: #1a1a2e;
+        color: #e0e0e0;
+        border: none;
+        padding: 12px 14px;
+        font-size: 13px;
+        line-height: 1.5;
+        resize: none;
+        outline: none;
+        font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+    #notes::placeholder { color: #555; }
+    #transcript {
+        flex: 1;
+        padding: 12px 14px;
+        font-size: 12px;
+        line-height: 1.6;
+        overflow-y: auto;
+        color: #bbb;
+        white-space: pre-wrap;
+    }
+    .chunk {
+        margin-bottom: 8px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid #222;
+    }
+    .chunk-time {
+        font-size: 10px;
+        color: #e94560;
+        margin-bottom: 2px;
+    }
+    .status {
+        padding: 4px 14px;
+        font-size: 11px;
+        color: #555;
+        background: #16213e;
+        border-top: 1px solid #0f3460;
+        flex-shrink: 0;
+    }
+</style>
+</head>
+<body>
+    <div class="header">
+        <h2>]] .. meetingTitle .. [[</h2>
+        <span class="timer" id="timer">0:00</span>
+    </div>
+    <div class="tabs">
+        <div class="tab active" onclick="switchTab('notes')">My Notes</div>
+        <div class="tab" onclick="switchTab('transcript')">Live Transcript</div>
+    </div>
+    <div class="panel active" id="panel-notes">
+        <textarea id="notes" placeholder="Type your meeting notes here...&#10;&#10;Tips:&#10;- Key decisions&#10;- Action items&#10;- Questions to follow up"></textarea>
+    </div>
+    <div class="panel" id="panel-transcript">
+        <div id="transcript"></div>
+    </div>
+    <div class="status" id="status">Recording from BlackHole 2ch...</div>
+<script>
+    function switchTab(name) {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+        document.querySelector('.tab[onclick*="' + name + '"]').classList.add('active');
+        document.getElementById('panel-' + name).classList.add('active');
+    }
+
+    // Timer
+    let startTime = Date.now();
+    setInterval(() => {
+        let elapsed = Math.floor((Date.now() - startTime) / 1000);
+        let min = Math.floor(elapsed / 60);
+        let sec = elapsed % 60;
+        document.getElementById('timer').textContent = min + ':' + (sec < 10 ? '0' : '') + sec;
+    }, 1000);
+
+    // Called from Lua to append transcript chunks
+    function appendTranscript(time, text) {
+        let div = document.createElement('div');
+        div.className = 'chunk';
+        div.innerHTML = '<div class="chunk-time">' + time + '</div>' + text;
+        let container = document.getElementById('transcript');
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+    }
+
+    function setStatus(msg) {
+        document.getElementById('status').textContent = msg;
+    }
+
+    function getNotes() {
+        return document.getElementById('notes').value;
+    }
+</script>
+</body>
+</html>]]
+end
+
+-- Create and show the notepad window
+local function showMeetingNotepad()
+    if meetingNotepad then meetingNotepad:delete(); meetingNotepad = nil end
+
+    local screen = hs.screen.mainScreen():frame()
+    local w, h = 380, 500
+    local x = screen.x + screen.w - w - 20
+    local y = screen.y + 60
+
+    local title = os.date("Meeting — %H:%M")
+
+    meetingNotepad = hs.webview.new({ x = x, y = y, w = w, h = h })
+    meetingNotepad:windowStyle({ "titled", "closable", "resizable", "miniaturizable" })
+    meetingNotepad:level(hs.canvas.windowLevels.floating)
+    meetingNotepad:allowTextEntry(true)
+    meetingNotepad:windowTitle("Meeting Notes")
+    meetingNotepad:html(meetingNotepadHTML(title))
+    meetingNotepad:show()
+    meetingNotepad:bringToFront()
+end
+
+-- Get user notes from the notepad
+local function getMeetingNotes(callback)
+    if not meetingNotepad then callback(""); return end
+    meetingNotepad:evaluateJavaScript("getNotes()", function(result, err)
+        callback(result or "")
+    end)
+end
+
+-- Append a transcript chunk to the notepad
+local function appendTranscriptToNotepad(timeStr, text)
+    if not meetingNotepad then return end
+    local escaped = text:gsub("\\", "\\\\"):gsub("'", "\\'"):gsub("\n", "\\n"):gsub("\r", "")
+    local timeEscaped = timeStr:gsub("'", "\\'")
+    meetingNotepad:evaluateJavaScript("appendTranscript('" .. timeEscaped .. "', '" .. escaped .. "')")
+end
+
+local function setNotepadStatus(msg)
+    if not meetingNotepad then return end
+    local escaped = msg:gsub("\\", "\\\\"):gsub("'", "\\'")
+    meetingNotepad:evaluateJavaScript("setStatus('" .. escaped .. "')")
+end
+
+-- Transcribe a meeting chunk
+local function transcribeMeetingChunk(chunkPath, chunkIdx)
+    local elapsed = math.floor(hs.timer.secondsSinceEpoch() - meetingStartTime)
+    local min = math.floor(elapsed / 60)
+    local sec = elapsed % 60
+    local timeStr = string.format("%d:%02d", min, sec)
+
+    local model = getModelPath()
+    local task = hs.task.new(WHISPER_BIN, function(code, stdout, stderr)
+        if code ~= 0 then
+            log("meeting: transcription failed for chunk " .. chunkIdx)
+            return
+        end
+        local text = stdout:gsub("%[.*%]", ""):gsub("^%s+", ""):gsub("%s+$", "")
+        if text ~= "" and not isHallucination(text) then
+            table.insert(meetingTranscript, { time = timeStr, text = text })
+            appendTranscriptToNotepad(timeStr, text)
+            log("meeting: chunk " .. chunkIdx .. " → " .. #text .. " chars")
+        end
+    end, {
+        "-m", model,
+        "-f", chunkPath,
+        "--no-prints",
+        "-t", "4",
+    })
+    task:setEnvironment({ HOME = HOME, PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" })
+    task:start()
+end
+
+-- Check for new meeting chunks and transcribe them
+local function processMeetingChunks()
+    if not meetingRecording then return end
+    local chunks = {}
+    local ok, iter, dir = pcall(hs.fs.dir, meetingChunkDir)
+    if not ok then return end
+    for file in iter, dir do
+        if file:match("%.wav$") then table.insert(chunks, file) end
+    end
+    table.sort(chunks)
+
+    -- Transcribe any new chunks (skip the last one, it's still being written)
+    for i, chunk in ipairs(chunks) do
+        if i > meetingChunkIndex and i < #chunks then
+            meetingChunkIndex = i
+            transcribeMeetingChunk(meetingChunkDir .. "/" .. chunk, i)
+        end
+    end
+end
+
+-- Save meeting output as markdown
+local function saveMeetingOutput(notes, callback)
+    os.execute("mkdir -p '" .. MEETINGS_DIR .. "'")
+    local filename = os.date("%Y-%m-%d-%H%M") .. ".md"
+    local filepath = MEETINGS_DIR .. "/" .. filename
+
+    -- Build transcript text
+    local transcriptText = ""
+    for _, chunk in ipairs(meetingTranscript) do
+        transcriptText = transcriptText .. "[" .. chunk.time .. "] " .. chunk.text .. "\n\n"
+    end
+
+    -- Build the markdown
+    local md = "# Meeting Notes — " .. os.date("%Y-%m-%d %H:%M") .. "\n\n"
+
+    if notes and notes:gsub("%s+", "") ~= "" then
+        md = md .. "## My Notes\n\n" .. notes .. "\n\n"
+    end
+
+    if transcriptText ~= "" then
+        md = md .. "## Transcript\n\n" .. transcriptText
+    end
+
+    -- Try to summarize with Ollama
+    if getRefineMode() and hasOllama() and #transcriptText > 100 then
+        setNotepadStatus("Generating summary with Ollama...")
+        local summaryPrompt = "Summarize this meeting transcript into: 1) Key Points (bullet list), 2) Action Items (bullet list), 3) Decisions Made (bullet list). Be concise. Output ONLY the summary in markdown format.\n\n" .. transcriptText:sub(1, 4000)
+        local jsonPayload = hs.json.encode({
+            model = getRefineModel(),
+            prompt = summaryPrompt,
+            stream = false,
+        })
+        local tmpPayload = WHISPER_TMP .. "/meeting_summary_payload.json"
+        local f = io.open(tmpPayload, "w")
+        if f then f:write(jsonPayload); f:close() end
+        local task = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+            if code == 0 and stdout and #stdout > 0 then
+                local ok, result = pcall(hs.json.decode, stdout)
+                if ok and result and result.response then
+                    local summary = result.response:gsub("^%s+", ""):gsub("%s+$", "")
+                    if summary ~= "" then
+                        md = "# Meeting Notes — " .. os.date("%Y-%m-%d %H:%M") .. "\n\n"
+                            .. "## Summary\n\n" .. summary .. "\n\n"
+                        if notes and notes:gsub("%s+", "") ~= "" then
+                            md = md .. "## My Notes\n\n" .. notes .. "\n\n"
+                        end
+                        md = md .. "## Full Transcript\n\n" .. transcriptText
+                        log("meeting: summary generated (" .. #summary .. " chars)")
+                    end
+                end
+            end
+            -- Save regardless of summary success
+            local fout = io.open(filepath, "w")
+            if fout then fout:write(md); fout:close() end
+            log("meeting: saved to " .. filepath)
+            setNotepadStatus("Saved to " .. filepath)
+            callback(filepath)
+        end, {
+            "-s", "-X", "POST",
+            "http://localhost:11434/api/generate",
+            "-H", "Content-Type: application/json",
+            "-d", "@" .. tmpPayload,
+            "--max-time", "60",
+        })
+        task:setEnvironment({ HOME = HOME, PATH = "/usr/bin:/bin" })
+        task:start()
+    else
+        local fout = io.open(filepath, "w")
+        if fout then fout:write(md); fout:close() end
+        log("meeting: saved to " .. filepath)
+        setNotepadStatus("Saved to " .. filepath)
+        callback(filepath)
+    end
+end
+
+-- Start meeting recording
+startMeeting = function()
+    if meetingRecording then return end
+    if not hasBlackHole() then
+        showBlackHoleSetup()
+        return
+    end
+
+    meetingRecording = true
+    meetingStartTime = hs.timer.secondsSinceEpoch()
+    meetingTranscript = {}
+    meetingChunkIndex = 0
+
+    os.execute("rm -rf '" .. meetingChunkDir .. "'")
+    os.execute("mkdir -p '" .. meetingChunkDir .. "'")
+
+    log("meeting: start")
+
+    -- Show notepad
+    showMeetingNotepad()
+
+    -- Start recording from BlackHole
+    local bhDevice = getBlackHoleDevice()
+    meetingFfmpegTask = hs.task.new(FFMPEG, function(code, out, err)
+        log("meeting: ffmpeg exited " .. tostring(code))
+    end, {
+        "-f", "avfoundation", "-i", bhDevice,
+        "-ac", "1", "-ar", "16000",
+        "-f", "segment", "-segment_time", tostring(MEETING_CHUNK_SECONDS),
+        "-segment_format", "wav",
+        meetingChunkDir .. "/chunk_%04d.wav"
+    })
+    meetingFfmpegTask:start()
+
+    -- Periodically check for new chunks and transcribe
+    meetingTranscribeTimer = hs.timer.doEvery(MEETING_CHUNK_SECONDS + 2, processMeetingChunks)
+
+    updateMenuBar()
+    hs.notify.new({ title = "local-whisper", informativeText = "Meeting recording started" }):send()
+end
+
+-- Stop meeting recording
+stopMeeting = function()
+    if not meetingRecording then return end
+    meetingRecording = false
+    log("meeting: stop")
+
+    -- Stop ffmpeg
+    if meetingFfmpegTask and meetingFfmpegTask:isRunning() then
+        meetingFfmpegTask:interrupt()
+    end
+    meetingFfmpegTask = nil
+
+    -- Stop transcription timer
+    if meetingTranscribeTimer then meetingTranscribeTimer:stop(); meetingTranscribeTimer = nil end
+
+    -- Process any remaining chunks
+    setNotepadStatus("Transcribing final chunks...")
+    hs.timer.doAfter(2, function()
+        -- Transcribe remaining chunks
+        meetingChunkIndex = 0  -- reset to process all
+        local chunks = {}
+        local ok, iter, dir = pcall(hs.fs.dir, meetingChunkDir)
+        if ok then
+            for file in iter, dir do
+                if file:match("%.wav$") then table.insert(chunks, file) end
+            end
+        end
+        table.sort(chunks)
+
+        -- Count already-transcribed chunks and only do remaining
+        local alreadyDone = #meetingTranscript
+        local remaining = #chunks - alreadyDone
+        if remaining > 0 then
+            setNotepadStatus("Transcribing " .. remaining .. " remaining chunks...")
+        end
+
+        -- Wait a bit for final transcriptions, then save
+        local waitTime = math.max(remaining * 3, 2)
+        hs.timer.doAfter(waitTime, function()
+            getMeetingNotes(function(notes)
+                saveMeetingOutput(notes, function(filepath)
+                    updateMenuBar()
+                    hs.notify.new({
+                        title = "Meeting notes saved",
+                        informativeText = filepath,
+                    }):send()
+                end)
+            end)
+        end)
+    end)
+
+    updateMenuBar()
+end
 
 --------------------------------------------------------------------------------
 -- Startup
