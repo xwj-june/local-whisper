@@ -132,6 +132,7 @@ A waveform icon in the menu bar shows recording status (turns red when recording
 - Click any setting to cycle it
 - Toggle the **live preview** while recording (off by default)
 - Switch the overlay **theme** (Frosted Light / Warm Paper / Soft Dark)
+- Change the **loading icon** shown while transcribing (4 styles)
 - Change the **completion sound** (or turn it off)
 - View and re-paste recent dictations
 - Open the settings overlay
@@ -157,6 +158,7 @@ file in `~/.local-whisper/`.
 | **Live preview** | Rough partial text in the overlay while recording | Menu bar → *Live preview* | on / off | off |
 | **LLM refine** | Clean up text with a local LLM (needs Ollama) | Menu bar / overlay `refine` chip | on / off | off |
 | **Theme** | Overlay look | Menu bar → *Theme* | Frosted Light · Warm Paper · Soft Dark | Frosted Light |
+| **Loading icon** | Spinner style shown while transcribing | Menu bar → *Loading icon* | Bouncing dots · Comet ring · Orbit dots · Pulse ring | Bouncing dots |
 | **Done sound** | Sound after text is inserted | Menu bar → *Done sound* | any macOS system sound, or Off | Glass |
 | **Preferred languages** | Languages kept in `auto` mode | `~/.local-whisper/preferred_langs` | comma list, e.g. `en,zh` | `en,zh` |
 | **Custom vocabulary** | Bias whisper toward terms / a script | `~/.local-whisper/prompt` | free text | (empty) |
@@ -183,8 +185,11 @@ so if your input device is broken or muted, you'll see flat bars instead of fals
 reassurance. (The level is sampled about once a second, so it reacts with a short
 lag.)
 
-After you release the key, the overlay shows a **loading spinner** while it
-transcribes, then the text drops into your input box and the overlay closes.
+After you release the key, the meter is replaced by a **loading spinner** in the
+same spot (same red, so it reads as one motion) while it transcribes; then the
+text drops into your input box and the overlay closes. In this mode the panel is
+a compact single row — no wasted space. Pick the spinner style from the menu bar
+→ **Loading icon** (Bouncing dots, Comet ring, Orbit dots, Pulse ring).
 
 ### Live preview
 

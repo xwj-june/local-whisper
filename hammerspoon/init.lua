@@ -409,6 +409,14 @@ local function setPreview(on)
     writeFile(PREVIEW_FILE, on and "on" or "off")
 end
 
+-- Loading-spinner style shown during transcription. Stored in
+-- ~/.local-whisper/spinner: bounce (default) | comet | orbit | pulse.
+local function getSpinner()
+    local s = readFile(CONFIG_DIR .. "/spinner"):gsub("%s+", "")
+    if s == "comet" or s == "orbit" or s == "pulse" or s == "bounce" then return s end
+    return "bounce"
+end
+
 -- Completion sound (played after text is inserted). Stored in
 -- ~/.local-whisper/sound as a macOS system-sound name (e.g. "Glass") or "off".
 local SOUND_FILE = CONFIG_DIR .. "/sound"
@@ -668,8 +676,9 @@ end
 --------------------------------------------------------------------------------
 
 local overlay = nil
-local stopSpinner  -- forward decl; assigned below. Called by hideOverlay so every
-                   -- teardown path stops the loading-spinner timer (no leak).
+local startSpinner, stopSpinner  -- forward decls; assigned below. stopSpinner is
+                   -- called by hideOverlay so every teardown path stops the
+                   -- loading-spinner timer; startSpinner by the menu pick-preview.
 
 -- Three selectable themes (cycle via menu bar). Colors are canvas {r,g,b,a}.
 -- Note: hs.canvas can't do real backdrop blur, so the frosted look is
@@ -720,18 +729,24 @@ local TH = THEMES.light  -- active palette; reassigned in createOverlay()
 -- Element indices (order matches createOverlay's appendElements calls):
 -- 1=panel bg; 2/3=lang chip bg/txt; 4/5=output; 6/7=enter; 8/9=model;
 -- 10/11=refine; 12-16=level meter bars; 17=timer; 18=transcript text;
--- 19=close; 20=loading spinner
+-- 19=close; 20+=loading-spinner elements (count varies by style — see
+-- createOverlay; tracked at runtime via anim.spinFirst/spinCount).
 local EL = {
     langTxt = 3, outputTxt = 5,
     enterBg = 6, enterTxt = 7,
     modelTxt = 9, refineBg = 10, refineTxt = 11,
     meter = 12,  -- first of 5 bars (12..16); access as EL.meter + i
-    timer = 17, text = 18, close = 19, spinner = 20,
+    timer = 17, text = 18, close = 19,
 }
 -- Level-meter geometry, in one table. (Lua caps a function at 200 locals; the
 -- init.lua main chunk is near that, so meter/spinner config + state are grouped
 -- into tables — METER here, `anim` below — rather than many separate locals.)
 local METER = { bars = 5, x = 344, w = 4, gap = 3, base = 27, min = 3, max = 16 }
+-- Audio level meter + loading spinner runtime state, in one table. Declared here
+-- (before createOverlay, which references it) so it's an in-scope local, not a
+-- nil global. phase = meter wave; level = 0..1 mic envelope from checkSilence;
+-- spin* = loading-spinner element range/style/center/timer.
+local anim = { meterTimer = nil, phase = 0, level = 0, spinTimer = nil, spinAngle = 0 }
 
 local function refreshOverlayLabels()
     if not overlay then return end
@@ -752,7 +767,11 @@ local function createOverlay()
     TH = THEMES[getTheme()] or THEMES.light
     local screen = hs.screen.mainScreen()
     local frame = screen:frame()
-    local width, height = 460, 92
+    -- Minimal mode (preview off) is a compact single-row panel — the meter and
+    -- spinner share the top-right slot and there's no transcript area. Verbose
+    -- mode (preview on) is taller to fit the live transcript / result text.
+    local verbose = getPreview()
+    local width, height = 460, verbose and 92 or 40
     local padding = 20
     local x = frame.x + (frame.w - width) / 2           -- bottom-CENTER of screen
     local y = frame.y + frame.h - height - padding      -- just above the dock
@@ -834,16 +853,44 @@ local function createOverlay()
         frame = { x = 434, y = 9, w = 16, h = 18 },
         trackMouseDown = true, trackMouseUp = true,
     })
-    -- 20: Loading spinner (rotating arc) — shown during transcription. Centered in
-    -- the transcript area; hidden (alpha 0) until startSpinner runs. Not clickable,
-    -- and doesn't overlap the close button, so its render order is harmless.
-    overlay:appendElements({
-        id = "spinner", type = "arc",
-        center = { x = width / 2, y = 58 },
-        radius = 10, startAngle = 0, endAngle = 280,
-        action = "stroke", strokeWidth = 3,
-        strokeColor = { red = TH.text.red, green = TH.text.green, blue = TH.text.blue, alpha = 0.0 },
-    })
+    -- Loading spinner — built in the chosen style, in the SAME top-right slot as
+    -- the meter bars (the meter is hidden by then). Elements are appended after
+    -- the close button, hidden (alpha 0) until startSpinner runs; not clickable.
+    -- Color matches the meter bars (red) so recording → transcribing is seamless.
+    local spinnerCx = METER.x + ((METER.bars - 1) * (METER.w + METER.gap) + METER.w) / 2
+    local spinnerCy = METER.base - 9
+    local hidden = { red = 1, green = 0.3, blue = 0.3, alpha = 0.0 }
+    anim.spinStyle, anim.spinCx, anim.spinCy = getSpinner(), spinnerCx, spinnerCy
+    anim.spinFirst = #overlay + 1
+    if anim.spinStyle == "bounce" then
+        for i = 0, 2 do
+            overlay:appendElements({ id = "sp" .. i, type = "oval", action = "fill",
+                fillColor = hidden, frame = { x = spinnerCx - 9 + i * 7, y = spinnerCy - 2, w = 4, h = 4 } })
+        end
+        anim.spinCount = 3
+    elseif anim.spinStyle == "orbit" then
+        for i = 0, 7 do
+            local a = i * math.pi / 4
+            overlay:appendElements({ id = "sp" .. i, type = "oval", action = "fill",
+                fillColor = hidden,
+                frame = { x = spinnerCx + 6 * math.cos(a) - 1.6, y = spinnerCy + 6 * math.sin(a) - 1.6, w = 3.2, h = 3.2 } })
+        end
+        anim.spinCount = 8
+    elseif anim.spinStyle == "pulse" then
+        for i = 0, 1 do
+            overlay:appendElements({ id = "sp" .. i, type = "circle", action = "stroke",
+                strokeColor = hidden, strokeWidth = 2,
+                center = { x = spinnerCx, y = spinnerCy }, radius = 3 })
+        end
+        anim.spinCount = 2
+    else  -- comet: faint full-ring track + a bright rotating arc on top
+        overlay:appendElements({ id = "sp0", type = "circle", action = "stroke",
+            strokeColor = hidden, strokeWidth = 2.5, center = { x = spinnerCx, y = spinnerCy }, radius = 8 })
+        overlay:appendElements({ id = "sp1", type = "arc", action = "stroke",
+            strokeColor = hidden, strokeWidth = 2.5,
+            center = { x = spinnerCx, y = spinnerCy }, radius = 8, startAngle = 0, endAngle = 250 })
+        anim.spinCount = 2
+    end
 
     overlay:level(hs.canvas.windowLevels.floating)
     overlay:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces)
@@ -928,11 +975,6 @@ local menuBar = nil
 -- Recording indicator state
 local clockTimer = nil
 local recordingStartTime = 0
-
--- Audio level meter + loading spinner runtime state (grouped into one table; see
--- METER above for why). phase = meter traveling-wave; level = 0..1 mic envelope
--- from checkSilence; spinAngle = spinner rotation.
-local anim = { meterTimer = nil, phase = 0, level = 0, spinTimer = nil, spinAngle = 0 }
 
 -- Undo state
 local lastInsertedText = nil
@@ -1134,6 +1176,30 @@ local function buildMenuBarMenu()
         menu = soundItems,
     })
 
+    -- Loading icon (submenu: pick the transcription spinner style; previews it)
+    local spinNames = { bounce = "Bouncing dots", comet = "Comet ring", orbit = "Orbit dots", pulse = "Pulse ring" }
+    local currentSpin = getSpinner()
+    local spinItems = {}
+    for _, key in ipairs({ "bounce", "comet", "orbit", "pulse" }) do
+        table.insert(spinItems, {
+            title = spinNames[key],
+            checked = (currentSpin == key),
+            fn = function()
+                writeFile(CONFIG_DIR .. "/spinner", key)
+                updateMenuBar()
+                -- Quick live preview (only when idle, so we don't disturb a dictation)
+                if not isRecording then
+                    forceHideOverlay(); showOverlay(); startSpinner()
+                    hs.timer.doAfter(1.4, forceHideOverlay)
+                end
+            end,
+        })
+    end
+    table.insert(items, {
+        title = "Loading icon: " .. (spinNames[currentSpin] or currentSpin),
+        menu = spinItems,
+    })
+
     -- Settings overlay
     table.insert(items, {
         title = "Settings...",
@@ -1257,34 +1323,73 @@ local function stopRecordingIndicator()
     end
 end
 
--- Loading spinner (rotating arc) shown during transcription in minimal mode.
--- stopSpinner is the forward-declared local from the top of the file, so
--- hideOverlay/forceHideOverlay can stop the timer on every teardown path.
-local function startSpinner()
-    if not overlay or anim.spinTimer then return end
-    anim.spinAngle = 0
-    overlay[EL.spinner].strokeColor = { red = TH.text.red, green = TH.text.green, blue = TH.text.blue, alpha = 0.85 }
-    anim.spinTimer = hs.timer.doEvery(0.04, function()
+-- Loading spinner shown during transcription in minimal mode. Four styles
+-- (~/.local-whisper/spinner): bounce (default) | comet | orbit | pulse.
+-- createOverlay builds the chosen style's elements and records
+-- anim.spinFirst/spinCount/spinStyle/spinCx/spinCy. start/stopSpinner are the
+-- forward-declared locals so hideOverlay can always stop the timer, and the
+-- menu pick-preview can start one. Color matches the meter bars (red).
+startSpinner = function()
+    if not overlay or anim.spinTimer or not anim.spinFirst then return end
+    local function col(alpha) return { red = 1, green = 0.3, blue = 0.3, alpha = alpha } end
+    local first, n, style = anim.spinFirst, anim.spinCount, anim.spinStyle
+    local cx, cy = anim.spinCx, anim.spinCy
+    local t = 0
+    anim.spinTimer = hs.timer.doEvery(0.045, function()
         if not overlay then return end
-        anim.spinAngle = (anim.spinAngle + 11) % 360
-        overlay[EL.spinner].startAngle = anim.spinAngle
-        overlay[EL.spinner].endAngle = anim.spinAngle + 280
+        if style == "bounce" then
+            for i = 0, n - 1 do
+                local el = overlay[first + i]
+                el.frame = { x = cx - 9 + i * 7, y = cy - 2 + 4.5 * math.sin(t * 0.22 + i * 0.9), w = 4, h = 4 }
+                el.fillColor = col(0.9)
+            end
+        elseif style == "orbit" then
+            for i = 0, n - 1 do
+                local ph = ((t * 0.04) - i / n) % 1
+                overlay[first + i].fillColor = col(0.2 + 0.8 * (1 - ph))
+            end
+        elseif style == "pulse" then
+            for i = 0, n - 1 do
+                local ph = ((t * 0.025) + i * 0.5) % 1
+                local el = overlay[first + i]
+                el.radius = 2 + 7 * ph
+                el.strokeColor = col(0.85 * (1 - ph))
+            end
+        else  -- comet
+            overlay[first].strokeColor = col(0.18)
+            local a = (t * 9) % 360
+            overlay[first + 1].startAngle = a
+            overlay[first + 1].endAngle = a + 250
+            overlay[first + 1].strokeColor = col(0.9)
+        end
+        t = t + 1
     end)
 end
 
 stopSpinner = function()
     if anim.spinTimer then anim.spinTimer:stop(); anim.spinTimer = nil end
-    if overlay then
-        overlay[EL.spinner].strokeColor = { red = 0, green = 0, blue = 0, alpha = 0.0 }
+    if overlay and anim.spinFirst then
+        for i = 0, (anim.spinCount or 1) - 1 do
+            local el = overlay[anim.spinFirst + i]
+            if el then
+                el.fillColor = { red = 0, green = 0, blue = 0, alpha = 0 }
+                el.strokeColor = { red = 0, green = 0, blue = 0, alpha = 0 }
+            end
+        end
     end
 end
 
--- Show an error in the overlay (always visible, both modes), stop the spinner so
--- it isn't spinning over the message, then auto-hide.
+-- Show an error, stop the spinner, then auto-hide. Verbose mode has a text area
+-- so it shows inline; compact (minimal) mode has none, so use a notification.
 local function showOverlayError(msg)
     stopSpinner()
-    setOverlayText(msg)
-    hs.timer.doAfter(2, hideOverlay)
+    if getPreview() then
+        setOverlayText(msg)
+        hs.timer.doAfter(2, hideOverlay)
+    else
+        hs.notify.new({ title = "local-whisper", informativeText = msg }):send()
+        hideOverlay()
+    end
 end
 
 --------------------------------------------------------------------------------

@@ -84,23 +84,38 @@ toggle. With preview **off** (default) the overlay is purely visual:
   0..1), so a dead/silent input device reads as flat bars — confirming the mic
   is actually being heard. Bars animate via a per-bar traveling wave scaled by
   that level. (~1 s latency, since the level comes from the 1 s silence-check.)
-- **Transcribing:** a rotating-arc **loading spinner** instead of status text.
+- **Transcribing:** a **loading spinner** in the *same top-right slot* as the
+  meter (the meter is hidden by then) — no separate area for it. The spinner
+  style is selectable from a **Loading icon** menu submenu (with a live preview
+  on pick): **Bouncing dots** (default), **Comet ring**, **Orbit dots**, **Pulse
+  ring**. Stored in `~/.local-whisper/spinner`; the spinner is drawn in the same
+  red as the meter bars so recording → transcribing reads as one motion.
 - **Done:** the text goes straight into the input box and the overlay closes —
   no result is shown in the overlay.
 
-With preview **on**, the old verbose text behavior is kept (partial transcript,
-status strings, lingering result). Errors are always shown as text in both modes.
+Because minimal mode shows no transcript/result text, its panel is **compact**
+(single chip row, ~40px) instead of the tall 92px verbose panel — no empty space
+reserved at the bottom. Errors in minimal mode use a macOS **notification**
+(there's no text area); verbose mode shows them inline.
+
+With preview **on**, the old verbose text behavior is kept (tall panel, partial
+transcript, status strings, lingering result).
 
 Implementation notes:
-- New canvas elements: 5 meter bars (`EL.meter`+0..4) and an `arc` spinner
-  (`EL.spinner`); `EL` indices updated. `startRecordingIndicator` animates the
-  meter; `startSpinner`/`stopSpinner` drive the arc, with `stopSpinner`
-  forward-declared and called from `hideOverlay`/`forceHideOverlay` so every
-  teardown path stops the timer.
-- Meter geometry/state are grouped into `METER` / `anim` **tables** rather than
-  separate locals: the init.lua main chunk is near Lua's 200-locals-per-function
-  cap, and adding ~11 separate locals pushed it over (reload failed at load time
-  and took out the `hs` IPC port until a full Hammerspoon restart).
+- Canvas elements: 5 meter bars (`EL.meter`+0..4) plus the spinner's elements,
+  which vary by style (3 dots / 8 dots / 2 rings / track+arc) and are appended
+  after the close button; their range is tracked at runtime in
+  `anim.spinFirst`/`spinCount` rather than fixed `EL` indices.
+  `startRecordingIndicator` animates the meter; `startSpinner`/`stopSpinner`
+  drive the spinner (both forward-declared — `stopSpinner` called from
+  `hideOverlay`/`forceHideOverlay` so every teardown path stops the timer,
+  `startSpinner` from the menu pick-preview).
+- Meter/spinner geometry + state are grouped into `METER` / `anim` **tables**
+  rather than separate locals: the init.lua main chunk is near Lua's
+  200-locals-per-function cap, and adding many separate locals pushed it over
+  (reload failed at load time and took out the `hs` IPC port until a full
+  Hammerspoon restart). `anim` must be declared **before** `createOverlay`, which
+  references it — a later declaration makes it a nil global at overlay-build time.
 
 ## Runtime config changes (NOT in this repo — machine-local)
 

@@ -53,3 +53,5 @@ See [MODIFICATIONS.md](MODIFICATIONS.md) for details.
 - [x] Esc / ✕ to cancel a dictation (insert nothing)
 - [x] Live preview off by default, toggleable from the menu bar
 - [x] Minimal overlay: audio level meter while recording + loading spinner while transcribing
+- [x] Compact minimal panel (spinner reuses meter slot, no wasted space)
+- [x] Selectable loading icon — 4 spinner styles from the menu (default bouncing dots)
