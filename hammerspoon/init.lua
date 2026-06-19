@@ -1162,7 +1162,8 @@ function stats.fmtDate(dateStr)
     local y, m, d = dateStr:match("(%d+)-(%d+)-(%d+)")
     if not y then return dateStr end
     local t = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12 })
-    return os.date("%b %-d", t)
+    -- "%b %-d" (no-leading-zero day) isn't portable in Lua's os.date — build it
+    return os.date("%b ", t) .. tonumber(os.date("%d", t))
 end
 
 -- Minimal HTML escaping for any text injected into the page.
@@ -1393,7 +1394,7 @@ function stats.html()
   })();
   </script>
 </body></html>]],
-        os.date("%b %-d"),
+        os.date("%b ") .. tonumber(os.date("%d")),
         fnum(today.words), fnum(today.zh), fnum(today.en), ftime(today.seconds), fnum(today.count),
         fnum(all.words), fnum(all.zh), fnum(all.en), ftime(all.seconds), fnum(all.count),
         table.concat(barsHTML),

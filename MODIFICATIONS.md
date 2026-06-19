@@ -117,6 +117,26 @@ Implementation notes:
   Hammerspoon restart). `anim` must be declared **before** `createOverlay`, which
   references it — a later declaration makes it a nil global at overlay-build time.
 
+### `hammerspoon/init.lua` — dictation stats
+
+Tracks how much you dictate and shows it in a stats window. Full design in
+[docs/STATS_DESIGN.md](docs/STATS_DESIGN.md). Summary:
+
+- **Counting:** hybrid word count — each CJK character = 1, each run of ASCII
+  word chars = 1 (`我在用 Claude Code` → zh 3 + en 2 = 5). Recorded only when text
+  is actually inserted; cancelled/empty dictations count nothing.
+- **Storage:** `~/.local-whisper/stats.json`, per-local-day buckets
+  (`{words,zh,en,seconds,count}`) + `since`; all-time = sum of days. **Atomic
+  write** (temp file + `os.rename`). Corrupt file → start fresh.
+- **UI:** menu **Stats…** opens an `hs.webview` dashboard (Today / All-time,
+  tabbed 14-day bar chart + 17-week GitHub-style heatmap, secondary stats),
+  drawn in the meter red; plus a glance line in the menu.
+- All state/functions hang off one **global** `stats` table (like `_whisper` /
+  `WhisperActions`) — the 200-locals cap left no room for even one new top-level
+  local. Defined before its callers.
+- Note: `os.date` rejects the non-portable `%-d`; format no-leading-zero days as
+  `os.date("%b ") .. tonumber(os.date("%d"))`.
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

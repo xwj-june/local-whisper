@@ -55,3 +55,4 @@ See [MODIFICATIONS.md](MODIFICATIONS.md) for details.
 - [x] Minimal overlay: audio level meter while recording + loading spinner while transcribing
 - [x] Compact minimal panel (spinner reuses meter slot, no wasted space)
 - [x] Selectable loading icon — 4 spinner styles from the menu (default bouncing dots)
+- [x] Dictation stats — words (today/all-time), time, count; `Stats…` webview with 14-day bar + 17-week heatmap ([spec](docs/STATS_DESIGN.md))
