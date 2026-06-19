@@ -90,13 +90,6 @@ printf '以下是简体中文的对话记录，请将语音转写为规范的简
 - Hardware: Apple M4 / 32 GB. Release-to-result latency ~3–5 s, dominated by
   per-dictation model load + inference.
 
-## Possible future changes (discussed, not yet done)
+## Possible future changes
 
-- **Persistent `whisper-server`** to eliminate the per-dictation model reload
-  (~1–2 s floor). `whisper-server` binary already exists in the build. Trade-off:
-  needs process-lifecycle management and complicates model switching
-  (one server = one model; the tiny-preview optimization would need a 2nd server).
-- **Bake the zh/Simplified defaults into `init.lua`** so a fresh install starts
-  in Chinese without the runtime-config steps above.
-- **OpenCC post-processing** for a 100% Simplified guarantee (vs. the current
-  prompt-based bias).
+Ideas not yet built are tracked in [FEATURES.md](FEATURES.md).
