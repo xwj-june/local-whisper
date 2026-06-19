@@ -10,13 +10,15 @@ Hold **Right Cmd**, speak, release — text appears at your cursor.
 - **Voice commands**: Say "voice command note buy coffee" to save a note, "voice command open app Safari" to launch apps, and more — fully customizable
 - **Live preview**: Streaming overlay shows partial transcription while you speak
 - **Recording indicator**: Pulsing red dot and elapsed timer in the overlay
-- **Multi-language**: English, Portuguese, and auto-detect with preferred language fallback
+- **Multi-language**: English, Chinese (Simplified), and auto-detect with preferred-language fallback
 - **App-aware processing**: Auto-capitalizes in most apps, skips in terminals and code editors
 - **LLM refinement** (optional): Clean up dictated text with a local LLM via [Ollama](https://ollama.com) — fixes punctuation, removes filler words, formats numbered lists
 - **Text post-processing**: Remove filler words (um, uh, hmm), clean whitespace
 - **Custom vocabulary**: Provide a prompt file to improve recognition of domain-specific terms
 - **Auto-stop on silence**: Automatically stops recording after 3 seconds of silence
 - **Menu bar**: Waveform icon shows recording status (turns red), click for settings and recent dictations
+- **Themes**: Three overlay themes (Frosted Light, Warm Paper, Soft Dark), switchable from the menu bar
+- **Configurable sound**: Pick the completion sound — or turn it off — from the menu bar
 - **Recent dictations**: View and re-paste your last 10 dictations from the menu bar
 - **Fully local**: All processing on-device via whisper.cpp — nothing leaves your machine
 
@@ -128,12 +130,80 @@ A waveform icon in the menu bar shows recording status (turns red when recording
 
 - See current language, model, output mode, enter mode, and LLM refine status
 - Click any setting to cycle it
+- Switch the overlay **theme** (Frosted Light / Warm Paper / Soft Dark)
+- Change the **completion sound** (or turn it off)
 - View and re-paste recent dictations
 - Open the settings overlay
 - Reload voice commands
 - Emergency stop
 
 All settings are accessible from the menu bar — no keyboard shortcuts needed.
+
+## Settings & customization (user guide)
+
+Day-to-day settings live in the **menu bar** (click the waveform icon) and on the
+**overlay** itself (click a chip to cycle it). Everything else is a small text
+file in `~/.local-whisper/`.
+
+### Quick reference
+
+| Setting | What it does | Where to change it | Values | Default |
+|---|---|---|---|---|
+| **Language** | Transcription language | Menu bar / overlay `lang` chip | `EN`, `ZH`, `auto` | `ZH` |
+| **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `medium` |
+| **Output** | How text is inserted | Menu bar / overlay `output` chip | `paste`, `type` | `paste` |
+| **Enter after insert** | Press Return after inserting | Menu bar / overlay `⏎` chip | on / off | off |
+| **LLM refine** | Clean up text with a local LLM (needs Ollama) | Menu bar / overlay `refine` chip | on / off | off |
+| **Theme** | Overlay look | Menu bar → *Theme* | Frosted Light · Warm Paper · Soft Dark | Frosted Light |
+| **Done sound** | Sound after text is inserted | Menu bar → *Done sound* | any macOS system sound, or Off | Glass |
+| **Preferred languages** | Languages kept in `auto` mode | `~/.local-whisper/preferred_langs` | comma list, e.g. `en,zh` | `en,zh` |
+| **Custom vocabulary** | Bias whisper toward terms / a script | `~/.local-whisper/prompt` | free text | (empty) |
+| **Trigger key** | Hold-to-dictate key | `./setup.sh`, or `TRIGGER_KEY` in `init.lua` | `rightCmd`, `rightAlt`, `rightCtrl` | `rightCmd` |
+| **Microphone** | Input device | `./setup.sh`, or `AUDIO_DEVICE` in `init.lua` | `:default`, `:0`, `:1`… | `:default` |
+| **Auto-stop silence** | Stop after N seconds of silence | constants in `init.lua` | seconds / dB | 3 s / −40 dB |
+| **Voice commands** | Spoken actions | `~/.hammerspoon/local_whisper_actions.lua` | Lua hooks | examples preinstalled |
+
+> **Reloading:** files in `~/.local-whisper/` are read on every dictation — no
+> reload needed. After editing `init.lua`, reload Hammerspoon (menu bar icon →
+> *Reload Config*). The voice-commands file auto-reloads on save.
+
+### The overlay
+
+While recording, a panel appears at the **bottom-center** of the screen with the
+live transcript and a row of clickable **chips** (language, output, ⏎, model,
+refine). Click a chip to cycle that setting; the toggle chips (⏎, refine) fill
+with the accent color when on. Click the empty panel to **pin** it open; click
+**✕** to close (or stop a recording).
+
+### Themes
+
+Switch from the menu bar (**Theme**). Three options cycle in order:
+
+- **Frosted Light** — translucent light, macOS-native feel (default)
+- **Warm Paper** — warm off-white with an orange accent
+- **Soft Dark** — soft dark slate (not pure black)
+
+Stored in `~/.local-whisper/theme`.
+
+### Completion sound
+
+The sound played once text is inserted. Menu bar → **Done sound** lists the macOS
+system sounds plus **Off**; picking one previews it and saves the choice. Stored
+in `~/.local-whisper/sound` (a sound name, or `off`). The start/stop cues remain
+`Pop` / `Tink`.
+
+### Simplified Chinese
+
+This setup is tuned for Simplified Chinese:
+
+- Set **Language** to `ZH` for the most reliable result — `auto` works but is slower.
+- Whisper mixes Traditional and Simplified output. `~/.local-whisper/prompt` is
+  seeded with a Simplified-Chinese sentence to bias the output toward Simplified.
+  Occasional Traditional characters are a model limitation; see
+  [MODIFICATIONS.md](MODIFICATIONS.md) for a 100%-Simplified OpenCC option.
+- For better Chinese accuracy at the cost of speed, download a larger model:
+  `bash ~/whisper.cpp/models/download-ggml-model.sh large-v3`, then pick it from
+  the menu bar.
 
 ## Custom vocabulary prompt
 
