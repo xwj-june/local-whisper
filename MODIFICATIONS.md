@@ -20,6 +20,21 @@ re-transcribes as English when the detected language isn't in `preferred_langs`)
 - `cycleLang()` — cycle table changed from `{ en=pt, pt=auto, auto=en }`
   to `{ en=zh, zh=auto, auto=en }`.
 
+### `hammerspoon/init.lua` — overlay redesign + selectable themes
+
+Reworked the dictation overlay (`createOverlay` / `refreshOverlayLabels`):
+
+- **Position:** moved from bottom-right to **bottom-center** of the screen.
+- **Three themes** (`THEMES` table), switchable from the menu bar (**Theme:**
+  item, cycles Frosted Light → Warm Paper → Soft Dark). Stored in
+  `~/.local-whisper/theme`; default `light`. (Canvas can't do real backdrop
+  blur, so the frosted look is a semi-transparent solid fill.)
+- **New toggle style:** settings are now rounded "chips" — toggle chips
+  (`enter`/`refine`) fill with the accent color when ON and go ghost when OFF;
+  value chips (`lang`/`output`/`model`) show their current value. Removed the
+  old hover-to-recolor behavior (state is now always visible from the fill).
+- Added `getTheme()` / `cycleTheme()` helpers.
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

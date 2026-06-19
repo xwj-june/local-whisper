@@ -69,6 +69,7 @@ local TRIGGER_KEY = "rightCmd"
 -- User preference files (all in CONFIG_DIR)
 local LANG_FILE = CONFIG_DIR .. "/lang"
 local OUTPUT_FILE = CONFIG_DIR .. "/output"
+local THEME_FILE = CONFIG_DIR .. "/theme"
 local PREFERRED_LANGS_FILE = CONFIG_DIR .. "/preferred_langs"
 local ENTER_FILE = CONFIG_DIR .. "/enter"
 local PROMPT_FILE = CONFIG_DIR .. "/prompt"
@@ -380,6 +381,20 @@ local function cycleOutput()
     return next
 end
 
+-- Overlay theme: "light" (Frosted Light), "paper" (Warm Paper), "dark" (Soft Dark)
+local function getTheme()
+    local t = readFile(THEME_FILE):gsub("%s+", "")
+    if t == "light" or t == "paper" or t == "dark" then return t end
+    return "light"
+end
+
+local function cycleTheme()
+    local cycle = { light = "paper", paper = "dark", dark = "light" }
+    local next = cycle[getTheme()] or "light"
+    writeFile(THEME_FILE, next)
+    return next
+end
+
 local function cycleEnter()
     local next = getEnterMode() and "off" or "on"
     writeFile(ENTER_FILE, next)
@@ -612,150 +627,166 @@ end
 --------------------------------------------------------------------------------
 
 local overlay = nil
-local btnColor = { red = 0.5, green = 0.8, blue = 1.0, alpha = 1.0 }
-local btnHover = { red = 0.7, green = 0.9, blue = 1.0, alpha = 1.0 }
 
--- Element indices: 1=bg, 2=lang, 3=sep1, 4=output, 5=sep2, 6=enter, 7=sep3, 8=model, 9=sep4, 10=refine, 11=text, 12=dot, 13=timer, 14=close
-local EL = { lang = 2, output = 4, enter = 6, model = 8, refine = 10, text = 11, dot = 12, timer = 13, close = 14 }
+-- Three selectable themes (cycle via menu bar). Colors are canvas {r,g,b,a}.
+-- Note: hs.canvas can't do real backdrop blur, so the frosted look is
+-- approximated with a semi-transparent solid fill.
+local THEMES = {
+    light = {  -- A · Frosted Light
+        panelBg     = { red = 0.97, green = 0.97, blue = 0.98, alpha = 0.95 },
+        panelPinBg  = { red = 1,    green = 1,    blue = 1,    alpha = 0.98 },
+        panelStroke = { red = 1,    green = 1,    blue = 1,    alpha = 0.60 },
+        text        = { red = 0.11, green = 0.12, blue = 0.15, alpha = 1 },
+        chipBg      = { red = 0,    green = 0,    blue = 0,    alpha = 0.06 },
+        chipText    = { red = 0.29, green = 0.33, blue = 0.39, alpha = 1 },
+        accentBg    = { red = 0.15, green = 0.39, blue = 0.92, alpha = 1 },
+        accentText  = { red = 1,    green = 1,    blue = 1,    alpha = 1 },
+        offBg       = { red = 0,    green = 0,    blue = 0,    alpha = 0.04 },
+        offText     = { red = 0.60, green = 0.62, blue = 0.66, alpha = 1 },
+        close       = { red = 0.11, green = 0.12, blue = 0.15, alpha = 0.75 },
+    },
+    paper = {  -- B · Warm Paper
+        panelBg     = { red = 0.99, green = 0.97, blue = 0.94, alpha = 0.96 },
+        panelPinBg  = { red = 1,    green = 0.99, blue = 0.96, alpha = 0.99 },
+        panelStroke = { red = 1,    green = 1,    blue = 1,    alpha = 0.70 },
+        text        = { red = 0.16, green = 0.15, blue = 0.14, alpha = 1 },
+        chipBg      = { red = 0.47, green = 0.35, blue = 0.24, alpha = 0.10 },
+        chipText    = { red = 0.47, green = 0.44, blue = 0.40, alpha = 1 },
+        accentBg    = { red = 0.92, green = 0.45, blue = 0.09, alpha = 1 },
+        accentText  = { red = 1,    green = 1,    blue = 1,    alpha = 1 },
+        offBg       = { red = 0.47, green = 0.35, blue = 0.24, alpha = 0.06 },
+        offText     = { red = 0.71, green = 0.67, blue = 0.62, alpha = 1 },
+        close       = { red = 0.34, green = 0.33, blue = 0.30, alpha = 1 },
+    },
+    dark = {   -- C · Soft Dark
+        panelBg     = { red = 0.15, green = 0.16, blue = 0.20, alpha = 0.90 },
+        panelPinBg  = { red = 0.17, green = 0.18, blue = 0.24, alpha = 0.95 },
+        panelStroke = { red = 1,    green = 1,    blue = 1,    alpha = 0.08 },
+        text        = { red = 0.95, green = 0.96, blue = 0.98, alpha = 1 },
+        chipBg      = { red = 1,    green = 1,    blue = 1,    alpha = 0.10 },
+        chipText    = { red = 0.80, green = 0.83, blue = 0.88, alpha = 1 },
+        accentBg    = { red = 0.22, green = 0.74, blue = 0.97, alpha = 1 },
+        accentText  = { red = 0.03, green = 0.14, blue = 0.23, alpha = 1 },
+        offBg       = { red = 1,    green = 1,    blue = 1,    alpha = 0.05 },
+        offText     = { red = 0.42, green = 0.45, blue = 0.50, alpha = 1 },
+        close       = { red = 0.80, green = 0.83, blue = 0.88, alpha = 1 },
+    },
+}
+local TH = THEMES.light  -- active palette; reassigned in createOverlay()
 
-local enterOnColor = { red = 0.3, green = 1.0, blue = 0.3, alpha = 1.0 }
-local enterOffColor = { red = 0.5, green = 0.5, blue = 0.5, alpha = 0.5 }
-local refineOnColor = { red = 0.4, green = 0.8, blue = 1.0, alpha = 1.0 }
-local refineOffColor = { red = 0.5, green = 0.5, blue = 0.5, alpha = 0.5 }
+-- Element indices (order matches createOverlay's appendElements calls):
+-- 1=panel bg; 2/3=lang chip bg/txt; 4/5=output; 6/7=enter; 8/9=model;
+-- 10/11=refine; 12=dot; 13=timer; 14=transcript text; 15=close
+local EL = {
+    langTxt = 3, outputTxt = 5,
+    enterBg = 6, enterTxt = 7,
+    modelTxt = 9, refineBg = 10, refineTxt = 11,
+    dot = 12, timer = 13, text = 14, close = 15,
+}
 
 local function refreshOverlayLabels()
     if not overlay then return end
-    overlay[EL.lang].text = getLang():upper()
-    overlay[EL.output].text = getOutputMode():upper()
-    overlay[EL.enter].text = "⏎"
-    overlay[EL.enter].textColor = getEnterMode() and enterOnColor or enterOffColor
-    overlay[EL.model].text = getModelName()
+    -- Neutral chips just show their current value
+    overlay[EL.langTxt].text   = getLang():upper()
+    overlay[EL.outputTxt].text = getOutputMode():upper()
+    overlay[EL.modelTxt].text  = getModelName()
+    -- Toggle chips fill with accent when ON, go ghost when OFF
+    local enterOn = getEnterMode()
+    overlay[EL.enterBg].fillColor  = enterOn and TH.accentBg or TH.offBg
+    overlay[EL.enterTxt].textColor = enterOn and TH.accentText or TH.offText
     local refineOn = getRefineMode() and hasOllama()
-    overlay[EL.refine].text = refineOn and "refine ✓" or "refine ✗"
-    overlay[EL.refine].textColor = refineOn and refineOnColor or refineOffColor
+    overlay[EL.refineBg].fillColor  = refineOn and TH.accentBg or TH.offBg
+    overlay[EL.refineTxt].textColor = refineOn and TH.accentText or TH.offText
 end
 
 local function createOverlay()
+    TH = THEMES[getTheme()] or THEMES.light
     local screen = hs.screen.mainScreen()
     local frame = screen:frame()
-    local width, height = 420, 100
+    local width, height = 460, 92
     local padding = 20
-    local x = frame.x + frame.w - width - padding
-    local y = frame.y + frame.h - height - padding - 50
+    local x = frame.x + (frame.w - width) / 2           -- bottom-CENTER of screen
+    local y = frame.y + frame.h - height - padding      -- just above the dock
 
     overlay = hs.canvas.new({ x = x, y = y, w = width, h = height })
 
-    -- 1: Background (click to pin overlay open)
+    -- 1: Panel background (click empty area to pin overlay open)
     overlay:appendElements({
         id = "bg",
-        type = "rectangle", action = "fill",
-        roundedRectRadii = { xRadius = 10, yRadius = 10 },
-        fillColor = { red = 0.1, green = 0.1, blue = 0.1, alpha = 0.85 },
+        type = "rectangle", action = "strokeAndFill",
+        roundedRectRadii = { xRadius = 16, yRadius = 16 },
+        fillColor = TH.panelBg,
+        strokeColor = TH.panelStroke, strokeWidth = 1,
         trackMouseUp = true,
     })
 
-    -- Clickable status labels (each cycles on click)
-    local sepColor = { red = 0.4, green = 0.4, blue = 0.4, alpha = 1 }
+    -- Chips: each is a clickable rounded rect with a centered label on top.
+    -- Neutral chips (lang/output/model) show a value; toggle chips
+    -- (enter/refine) fill with the accent color when ON, ghost when OFF.
+    local cx = 13
+    local function chip(id, w, txt, isToggle, isOn)
+        local bgColor, txtColor
+        if isToggle then
+            bgColor  = isOn and TH.accentBg or TH.offBg
+            txtColor = isOn and TH.accentText or TH.offText
+        else
+            bgColor, txtColor = TH.chipBg, TH.chipText
+        end
+        overlay:appendElements({
+            id = id, type = "rectangle", action = "fill",
+            roundedRectRadii = { xRadius = 9, yRadius = 9 },
+            fillColor = bgColor,
+            frame = { x = cx, y = 9, w = w, h = 20 },
+            trackMouseUp = true,
+        })
+        overlay:appendElements({
+            id = id .. "Txt", type = "text", text = txt,
+            textColor = txtColor, textSize = 11, textAlignment = "center",
+            frame = { x = cx, y = 13, w = w, h = 15 },
+        })
+        cx = cx + w + 6
+    end
 
-    -- 2: Language
-    overlay:appendElements({
-        id = "lang", type = "text", text = getLang():upper(),
-        textColor = btnColor, textSize = 11,
-        frame = { x = "4%", y = "6%", w = "10%", h = "25%" },
-        trackMouseUp = true, trackMouseEnterExit = true,
-    })
-    -- 3: Separator
-    overlay:appendElements({
-        id = "sep1", type = "text", text = "|",
-        textColor = sepColor, textSize = 11,
-        frame = { x = "13%", y = "6%", w = "2%", h = "25%" },
-    })
-    -- 4: Output mode
-    overlay:appendElements({
-        id = "output", type = "text", text = getOutputMode():upper(),
-        textColor = btnColor, textSize = 11,
-        frame = { x = "15%", y = "6%", w = "13%", h = "25%" },
-        trackMouseUp = true, trackMouseEnterExit = true,
-    })
-    -- 5: Separator
-    overlay:appendElements({
-        id = "sep2", type = "text", text = "|",
-        textColor = sepColor, textSize = 11,
-        frame = { x = "27%", y = "6%", w = "2%", h = "25%" },
-    })
-    -- 6: Enter mode (⏎ green=on, gray=off)
-    overlay:appendElements({
-        id = "enter", type = "text", text = "⏎",
-        textColor = getEnterMode() and enterOnColor or enterOffColor, textSize = 11,
-        frame = { x = "29%", y = "6%", w = "5%", h = "25%" },
-        trackMouseUp = true, trackMouseEnterExit = true,
-    })
-    -- 7: Separator
-    overlay:appendElements({
-        id = "sep3", type = "text", text = "|",
-        textColor = sepColor, textSize = 11,
-        frame = { x = "34%", y = "6%", w = "2%", h = "25%" },
-    })
-    -- 8: Model
-    overlay:appendElements({
-        id = "model", type = "text", text = getModelName(),
-        textColor = btnColor, textSize = 11,
-        frame = { x = "36%", y = "6%", w = "20%", h = "25%" },
-        trackMouseUp = true, trackMouseEnterExit = true,
-    })
-    -- 9: Separator
-    overlay:appendElements({
-        id = "sep4", type = "text", text = "|",
-        textColor = sepColor, textSize = 11,
-        frame = { x = "54%", y = "6%", w = "2%", h = "25%" },
-    })
-    -- 10: LLM refine toggle
-    overlay:appendElements({
-        id = "refine", type = "text",
-        text = (getRefineMode() and hasOllama()) and "refine ✓" or "refine ✗",
-        textColor = (getRefineMode() and hasOllama()) and refineOnColor or refineOffColor,
-        textSize = 11,
-        frame = { x = "57%", y = "6%", w = "18%", h = "25%" },
-        trackMouseUp = true, trackMouseEnterExit = true,
-    })
-    -- 11: Transcript text
-    overlay:appendElements({
-        id = "text", type = "text", text = "Listening...",
-        textColor = { red = 1, green = 1, blue = 1, alpha = 1.0 },
-        textSize = 14,
-        frame = { x = "5%", y = "35%", w = "90%", h = "60%" },
-    })
-    -- 12: Recording indicator (pulsing red dot)
+    chip("lang",   46, getLang():upper(),       false)         -- 2/3
+    chip("output", 60, getOutputMode():upper(), false)         -- 4/5
+    chip("enter",  32, "⏎",                     true, getEnterMode())  -- 6/7
+    chip("model",  92, getModelName(),          false)         -- 8/9
+    chip("refine", 64, "refine", true, getRefineMode() and hasOllama())  -- 10/11
+
+    -- 12: Recording dot (red reads as "recording" on every theme; alpha is
+    -- driven by startRecordingIndicator)
     overlay:appendElements({
         id = "dot", type = "oval", action = "fill",
         fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 0.0 },
-        frame = { x = "89%", y = "8%", w = "3%", h = "12%" },
+        frame = { x = 372, y = 15, w = 8, h = 8 },
     })
-    -- 13: Elapsed time display
+    -- 13: Elapsed time
     overlay:appendElements({
         id = "timer", type = "text", text = "",
-        textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 0.0 },
-        textSize = 10,
-        frame = { x = "75%", y = "8%", w = "14%", h = "20%" },
-        textAlignment = "right",
+        textColor = { red = 0.9, green = 0.3, blue = 0.3, alpha = 0.0 },
+        textSize = 10, textAlignment = "right",
+        frame = { x = 384, y = 11, w = 42, h = 16 },
     })
-    -- 14: Close button (X) — last element so it's on top and clickable
+    -- 14: Transcript text
+    overlay:appendElements({
+        id = "text", type = "text", text = "Listening...",
+        textColor = TH.text, textSize = 14,
+        frame = { x = 13, y = 40, w = 434, h = 44 },
+    })
+    -- 15: Close button (X) — last element so it renders on top and stays clickable
     overlay:appendElements({
         id = "close", type = "text", text = "✕",
-        textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 0.8 },
-        textSize = 16, textAlignment = "center",
-        frame = { x = "90%", y = "10%", w = "8%", h = "20%" },
-        trackMouseDown = true, trackMouseUp = true, trackMouseEnterExit = true,
+        textColor = TH.close, textSize = 15, textAlignment = "center",
+        frame = { x = 434, y = 9, w = 16, h = 18 },
+        trackMouseDown = true, trackMouseUp = true,
     })
 
     overlay:level(hs.canvas.windowLevels.floating)
     overlay:behavior(hs.canvas.windowBehaviors.canJoinAllSpaces)
 
-    -- Map string IDs to numeric indices for element access
-    local idMap = { bg = 1, lang = EL.lang, output = EL.output, enter = EL.enter, model = EL.model, refine = EL.refine, close = EL.close }
-
-    -- Mouse handler: click bg to pin, click labels to cycle settings, X to close
-    overlay:canvasMouseEvents(true, true, true, false)  -- mouseDown + mouseUp + enterExit
+    -- Mouse: click a chip to cycle that setting, click empty panel to pin/unpin,
+    -- click ✕ to close. No hover styling — the chip fill shows state directly.
+    overlay:canvasMouseEvents(true, true, false, false)  -- mouseDown + mouseUp
     overlay:mouseCallback(function(canvas, event, id, mx, my)
         -- Close button — hide immediately, delete deferred
         if id == "close" then
@@ -774,54 +805,23 @@ local function createOverlay()
             return
         end
 
-        if event == "mouseUp" then
-            if id == "bg" then
-                overlayPinned = not overlayPinned
-                if overlayPinned then
-                    canvas[1].fillColor = { red = 0.15, green = 0.15, blue = 0.2, alpha = 0.92 }
-                    log("overlay pinned")
-                else
-                    canvas[1].fillColor = { red = 0.1, green = 0.1, blue = 0.1, alpha = 0.85 }
-                    log("overlay unpinned")
-                    if not isRecording then hideOverlay() end
-                end
-                return
-            end
+        if event ~= "mouseUp" then return end
 
-            if id == "lang" then cycleLang()
-            elseif id == "output" then cycleOutput()
-            elseif id == "enter" then cycleEnter()
-            elseif id == "model" then cycleModel()
-            elseif id == "refine" then cycleRefine()
-            end
-            refreshOverlayLabels()
-
-        elseif event == "mouseEnter" then
-            local idx = idMap[id]
-            if not idx or id == "bg" then return end
-            if id == "close" then
-                canvas[idx].textColor = { red = 1, green = 0.3, blue = 0.3, alpha = 1 }
-            elseif id == "enter" then
-                canvas[idx].textColor = enterOnColor
-            elseif id == "refine" then
-                canvas[idx].textColor = refineOnColor
-            else
-                canvas[idx].textColor = btnHover
-            end
-
-        elseif event == "mouseExit" then
-            local idx = idMap[id]
-            if not idx or id == "bg" then return end
-            if id == "close" then
-                canvas[idx].textColor = { red = 1, green = 1, blue = 1, alpha = 0.5 }
-            elseif id == "enter" then
-                canvas[idx].textColor = getEnterMode() and enterOnColor or enterOffColor
-            elseif id == "refine" then
-                canvas[idx].textColor = (getRefineMode() and hasOllama()) and refineOnColor or refineOffColor
-            else
-                canvas[idx].textColor = btnColor
-            end
+        if id == "bg" then
+            overlayPinned = not overlayPinned
+            canvas[1].fillColor = overlayPinned and TH.panelPinBg or TH.panelBg
+            log(overlayPinned and "overlay pinned" or "overlay unpinned")
+            if not overlayPinned and not isRecording then hideOverlay() end
+            return
         end
+
+        if id == "lang" then cycleLang()
+        elseif id == "output" then cycleOutput()
+        elseif id == "enter" then cycleEnter()
+        elseif id == "model" then cycleModel()
+        elseif id == "refine" then cycleRefine()
+        end
+        refreshOverlayLabels()
     end)
 end
 
@@ -1022,6 +1022,27 @@ local function buildMenuBarMenu()
 
     table.insert(items, { title = "-" })
 
+    -- Theme (cycles Frosted Light → Warm Paper → Soft Dark)
+    local themeNames = { light = "Frosted Light", paper = "Warm Paper", dark = "Soft Dark" }
+    table.insert(items, {
+        title = "Theme: " .. (themeNames[getTheme()] or getTheme()),
+        fn = function()
+            cycleTheme()
+            updateMenuBar()
+            -- If the overlay is on screen, recreate it so the new theme shows live
+            if overlay then
+                local wasPinned = overlayPinned
+                forceHideOverlay()
+                showOverlay()
+                if wasPinned then
+                    overlayPinned = true
+                    overlay[1].fillColor = THEMES[getTheme()].panelPinBg
+                    setOverlayText("Theme: " .. (themeNames[getTheme()] or getTheme()))
+                end
+            end
+        end,
+    })
+
     -- Settings overlay
     table.insert(items, {
         title = "Settings...",
@@ -1031,7 +1052,7 @@ local function buildMenuBarMenu()
             else
                 showOverlay()
                 overlayPinned = true
-                overlay[1].fillColor = { red = 0.15, green = 0.15, blue = 0.2, alpha = 0.92 }
+                overlay[1].fillColor = THEMES[getTheme()].panelPinBg
                 setOverlayText("Click labels to change settings")
             end
         end,
