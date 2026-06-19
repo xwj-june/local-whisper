@@ -395,6 +395,20 @@ local function cycleTheme()
     return next
 end
 
+-- Live preview: rough tiny-model transcription shown in the overlay while
+-- recording. OFF by default — it's only a liveness indicator (laggy + uses the
+-- least-accurate model), never the final text, which is always re-transcribed
+-- with the chosen model on release. Stored in ~/.local-whisper/preview.
+local PREVIEW_FILE = CONFIG_DIR .. "/preview"
+
+local function getPreview()
+    return readFile(PREVIEW_FILE):gsub("%s+", "") == "on"
+end
+
+local function setPreview(on)
+    writeFile(PREVIEW_FILE, on and "on" or "off")
+end
+
 -- Completion sound (played after text is inserted). Stored in
 -- ~/.local-whisper/sound as a macOS system-sound name (e.g. "Glass") or "off".
 local SOUND_FILE = CONFIG_DIR .. "/sound"
@@ -1007,6 +1021,13 @@ local function buildMenuBarMenu()
         fn = function() cycleEnter(); updateMenuBar() end,
     })
 
+    -- Live preview while recording (rough tiny-model text; off by default)
+    local previewState = getPreview() and "ON" or "OFF"
+    table.insert(items, {
+        title = "Live preview: " .. previewState,
+        fn = function() setPreview(not getPreview()); updateMenuBar() end,
+    })
+
     -- LLM refinement
     if hasOllama() then
         local refineState = getRefineMode() and "ON" or "OFF"
@@ -1546,7 +1567,11 @@ local function startRecording()
     partialBusy = false
     silentChunkCount = 0
     lastCheckedChunk = 0
-    partialTimer = hs.timer.doEvery(PARTIAL_INTERVAL, doPartialTranscribe)
+    -- Live preview is opt-in; when off, the overlay just shows the recording
+    -- dot + timer until the final result lands (saves the per-2s tiny-model run).
+    if getPreview() then
+        partialTimer = hs.timer.doEvery(PARTIAL_INTERVAL, doPartialTranscribe)
+    end
     silenceTimer = hs.timer.doEvery(1.0, checkSilence)
 end
 

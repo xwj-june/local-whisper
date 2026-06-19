@@ -61,6 +61,18 @@ Added a way to discard the current dictation so nothing gets inserted:
 - The ✕ button now routes to `cancelDictation()` — previously it only dismissed
   the overlay after release, so the in-flight transcription still inserted.
 
+### `hammerspoon/init.lua` — live preview off by default, toggleable
+
+The rough `tiny`-model preview shown while recording used to always run. It's a
+liveness indicator, not the final text (which is re-transcribed with the chosen
+model on release), so it's now opt-in:
+
+- **Default off.** `startRecording` only starts the partial-transcribe timer
+  when preview is on, saving the per-2s `tiny` run otherwise.
+- New **Live preview: ON/OFF** menu-bar toggle (next to *Enter after insert*).
+- Stored in `~/.local-whisper/preview` (`on`/`off`); added `getPreview()` /
+  `setPreview()`.
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

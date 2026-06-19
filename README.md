@@ -8,7 +8,7 @@ Hold **Right Cmd**, speak, release — text appears at your cursor.
 
 - **Hold-to-dictate**: Hold a modifier key to record, release to transcribe and insert
 - **Voice commands**: Say "voice command note buy coffee" to save a note, "voice command open app Safari" to launch apps, and more — fully customizable
-- **Live preview**: Streaming overlay shows partial transcription while you speak
+- **Live preview** (off by default): Optional rough partial transcription in the overlay while you speak — a liveness indicator, toggle on from the menu bar
 - **Recording indicator**: Pulsing red dot and elapsed timer in the overlay
 - **Multi-language**: English, Chinese (Simplified), and auto-detect with preferred-language fallback
 - **App-aware processing**: Auto-capitalizes in most apps, skips in terminals and code editors
@@ -130,6 +130,7 @@ A waveform icon in the menu bar shows recording status (turns red when recording
 
 - See current language, model, output mode, enter mode, and LLM refine status
 - Click any setting to cycle it
+- Toggle the **live preview** while recording (off by default)
 - Switch the overlay **theme** (Frosted Light / Warm Paper / Soft Dark)
 - Change the **completion sound** (or turn it off)
 - View and re-paste recent dictations
@@ -153,6 +154,7 @@ file in `~/.local-whisper/`.
 | **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `medium` |
 | **Output** | How text is inserted | Menu bar / overlay `output` chip | `paste`, `type` | `paste` |
 | **Enter after insert** | Press Return after inserting | Menu bar / overlay `⏎` chip | on / off | off |
+| **Live preview** | Rough partial text in the overlay while recording | Menu bar → *Live preview* | on / off | off |
 | **LLM refine** | Clean up text with a local LLM (needs Ollama) | Menu bar / overlay `refine` chip | on / off | off |
 | **Theme** | Overlay look | Menu bar → *Theme* | Frosted Light · Warm Paper · Soft Dark | Frosted Light |
 | **Done sound** | Sound after text is inserted | Menu bar → *Done sound* | any macOS system sound, or Off | Glass |
@@ -169,11 +171,28 @@ file in `~/.local-whisper/`.
 
 ### The overlay
 
-While recording, a panel appears at the **bottom-center** of the screen with the
-live transcript and a row of clickable **chips** (language, output, ⏎, model,
-refine). Click a chip to cycle that setting; the toggle chips (⏎, refine) fill
-with the accent color when on. Click the empty panel to **pin** it open; click
-**✕** to cancel.
+While recording, a panel appears at the **bottom-center** of the screen with a
+pulsing red dot, the elapsed timer, and a row of clickable **chips** (language,
+output, ⏎, model, refine). Click a chip to cycle that setting; the toggle chips
+(⏎, refine) fill with the accent color when on. Click the empty panel to **pin**
+it open; click **✕** to cancel.
+
+### Live preview
+
+Off by default. When on (menu bar → **Live preview**), the overlay shows a rough,
+running transcription while you talk. It's only a *liveness indicator* — proof
+the mic is being heard — **not** the text you'll get:
+
+- It uses the fastest, least-accurate model (`tiny`) and refreshes every couple
+  of seconds, so it lags and often misreads what you said.
+- The text you actually receive is **re-transcribed from scratch** with your
+  chosen model (`medium`) the moment you release the key — the preview is thrown
+  away.
+
+It's off by default because on a fast machine the final result lands in a few
+seconds anyway, and a laggy, wrong preview tends to distract more than it helps.
+Turn it on if you like seeing that something's happening while you speak. Stored
+in `~/.local-whisper/preview` (`on` / `off`).
 
 ### Cancel a dictation
 

@@ -51,3 +51,4 @@ See [MODIFICATIONS.md](MODIFICATIONS.md) for details.
 - [x] Overlay redesign — bottom-center, chip toggles, 3 selectable themes
 - [x] Configurable completion sound (menu bar submenu)
 - [x] Esc / ✕ to cancel a dictation (insert nothing)
+- [x] Live preview off by default, toggleable from the menu bar
