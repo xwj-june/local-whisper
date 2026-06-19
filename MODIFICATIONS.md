@@ -47,6 +47,20 @@ The "text inserted" sound was hardcoded to `Glass.aiff`. Made it configurable:
   now calls `playDoneSound()`.
 - (Start/stop sounds remain `Pop` / `Tink`, not yet configurable.)
 
+### `hammerspoon/init.lua` — cancel a dictation (Esc / ✕)
+
+Added a way to discard the current dictation so nothing gets inserted:
+
+- **Esc** (or the overlay **✕**) cancels — works both while recording and during
+  the post-release transcription window. A global `keyDown` eventtap consumes Esc
+  only while a dictation is active (recording, or a non-pinned overlay is up);
+  otherwise Esc passes through to the focused app.
+- Added a `dictationCancelled` flag (reset in `startRecording`) checked in
+  `insertTranscribedText` / `finishInsertion`, plus `cancelDictation()` which
+  tears down recording/transcription and kills in-flight `whisper-cli`.
+- The ✕ button now routes to `cancelDictation()` — previously it only dismissed
+  the overlay after release, so the in-flight transcription still inserted.
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

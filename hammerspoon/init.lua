@@ -818,16 +818,10 @@ local function createOverlay()
         -- Close button — hide immediately, delete deferred
         if id == "close" then
             if event == "mouseDown" then
-                log("overlay: X close")
+                log("overlay: X close → cancel")
                 canvas:hide()
-                hs.timer.doAfter(0.01, function()
-                    overlayPinned = false
-                    if isRecording then
-                        emergencyStop()
-                    else
-                        if overlay then overlay:delete(); overlay = nil end
-                    end
-                end)
+                -- Defer: a canvas can't be deleted from inside its own mouse callback
+                hs.timer.doAfter(0.01, cancelDictation)
             end
             return
         end
@@ -882,6 +876,7 @@ end
 --------------------------------------------------------------------------------
 
 local isRecording = false
+local dictationCancelled = false  -- set by cancelDictation(); blocks any pending insert
 local overlayPinned = false
 local ffmpegTask = nil
 local partialTimer = nil
@@ -1300,6 +1295,7 @@ end
 
 -- Finish insertion after all processing (post-process, refine, hooks)
 local function finishInsertion(text, detectedLang)
+    if dictationCancelled then return end
     -- Build action context and run pre-insert hooks
     local ctx = buildActionContext(normalizeText(text), detectedLang or getLang(), getOutputMode())
     runPreInsertActions(ctx)
@@ -1351,6 +1347,7 @@ end
 
 -- Insert transcribed text at cursor, with post-processing, optional LLM refinement, and action hooks
 local function insertTranscribedText(text, detectedLang)
+    if dictationCancelled then hideOverlay(); return end
     if text == "" or isHallucination(text) then
         hideOverlay()
         return
@@ -1518,6 +1515,7 @@ end
 local function startRecording()
     if isRecording then return end
     isRecording = true
+    dictationCancelled = false
     log("recording: start")
 
     os.execute("rm -rf '" .. CHUNK_DIR .. "'")
@@ -1626,6 +1624,47 @@ hs.timer.doEvery(5, function()
         log("eventtap was disabled, re-enabling")
         modTap:start()
     end
+end)
+
+-- Cancel the current dictation entirely (Esc key or the ✕ button): tears down
+-- recording/transcription and sets a flag so any in-flight pipeline that
+-- finishes later inserts nothing. Safe to call at any stage.
+function cancelDictation()
+    if not (isRecording or overlay) then return end
+    log("dictation cancelled — discarding")
+    dictationCancelled = true
+    isRecording = false
+    if releasePoller then releasePoller:stop(); releasePoller = nil end
+    if partialTimer then partialTimer:stop(); partialTimer = nil end
+    if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
+    stopRecordingIndicator()
+    if ffmpegTask and ffmpegTask:isRunning() then ffmpegTask:interrupt() end
+    ffmpegTask = nil
+    partialBusy = false
+    silentChunkCount = 0
+    lastCheckedChunk = 0
+    os.execute("killall whisper-cli 2>/dev/null")
+    forceHideOverlay()
+    updateMenuBar()
+    hs.notify.new({ title = "local-whisper", informativeText = "Discarded ✕" }):send()
+end
+
+-- Esc cancels an in-progress dictation (while recording OR transcribing). When
+-- no dictation is active, Esc passes straight through to the focused app.
+local escKeyCode = hs.keycodes.map["escape"] or 53
+local escTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(event)
+    if event:getKeyCode() ~= escKeyCode then return false end
+    local active = isRecording or (overlay and not overlayPinned)
+    if not active then return false end
+    local ok, err = pcall(cancelDictation)
+    if not ok then log("cancel error: " .. tostring(err)) end
+    return true  -- consume Esc so it doesn't also reach the app
+end)
+escTap:start()
+
+-- Keep the Esc tap alive if macOS disables it (e.g. secure input fields)
+hs.timer.doEvery(5, function()
+    if not escTap:isEnabled() then escTap:start() end
 end)
 
 --------------------------------------------------------------------------------

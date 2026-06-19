@@ -173,7 +173,16 @@ While recording, a panel appears at the **bottom-center** of the screen with the
 live transcript and a row of clickable **chips** (language, output, ⏎, model,
 refine). Click a chip to cycle that setting; the toggle chips (⏎, refine) fill
 with the accent color when on. Click the empty panel to **pin** it open; click
-**✕** to close (or stop a recording).
+**✕** to cancel.
+
+### Cancel a dictation
+
+Changed your mind mid-sentence, or don't want what you just said? Press **Esc**
+(or click **✕**) — the dictation is discarded and **nothing is inserted**. It
+works both while recording *and* during the few seconds of transcription after
+you release the key. When you're not dictating, Esc behaves normally.
+
+(The spoken "voice command cancel" still works too, but Esc is more reliable.)
 
 ### Themes
 
