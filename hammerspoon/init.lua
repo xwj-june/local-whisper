@@ -1643,8 +1643,9 @@ end)
 modTap:start()
 _whisper.modTap = modTap
 
--- Re-enable eventtap if it gets disabled (e.g. by secure input)
-hs.timer.doEvery(5, function()
+-- Re-enable eventtap if it gets disabled (e.g. by secure input). Retained so the
+-- watchdog timer isn't garbage-collected (the tap itself is kept via _whisper.modTap).
+_whisper.modWatchdog = hs.timer.doEvery(5, function()
     if not modTap:isEnabled() then
         log("eventtap was disabled, re-enabling")
         modTap:start()
@@ -1686,9 +1687,13 @@ local escTap = hs.eventtap.new({ hs.eventtap.event.types.keyDown }, function(eve
     return true  -- consume Esc so it doesn't also reach the app
 end)
 escTap:start()
+-- Retain in the persistent table — a bare local would be garbage-collected and
+-- the tap would silently stop firing (modTap is kept alive the same way).
+_whisper.escTap = escTap
 
--- Keep the Esc tap alive if macOS disables it (e.g. secure input fields)
-hs.timer.doEvery(5, function()
+-- Keep the Esc tap alive if macOS disables it (e.g. secure input fields).
+-- Also retained, so the watchdog (and the escTap reference it holds) survives GC.
+_whisper.escWatchdog = hs.timer.doEvery(5, function()
     if not escTap:isEnabled() then escTap:start() end
 end)
 

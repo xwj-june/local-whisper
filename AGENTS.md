@@ -68,6 +68,7 @@ Tests filler removal, list formatting, preamble prevention, and content preserva
 - **Voice commands not matching**: Check `final (auto/...)` log line — whisper may have transcribed differently than expected
 - **X button not closing overlay**: `hs.canvas:delete()` inside its own mouse callback is silently ignored — must use `canvas:hide()` immediately then defer deletion with `hs.timer.doAfter(0.01, ...)`
 - **Recent dictations not persisting**: Lua upvalue scoping — never reassign a table variable that closures reference; populate in-place instead
+- **eventtap / timer stops firing after a while** (e.g. Esc-to-cancel works right after reload, then dies): an `hs.eventtap` or `hs.timer` held only by a bare `local` gets garbage-collected and silently stops. Retain it in the persistent `_whisper` table (`_whisper.escTap = escTap`), like `modTap`. A watchdog timer must itself be retained, or it's collected too.
 
 ### Hammerspoon canvas gotchas
 - Cannot delete a canvas from within its own mouse callback — defer with `hs.timer.doAfter(0.01, ...)`
