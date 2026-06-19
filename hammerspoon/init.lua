@@ -668,6 +668,8 @@ end
 --------------------------------------------------------------------------------
 
 local overlay = nil
+local stopSpinner  -- forward decl; assigned below. Called by hideOverlay so every
+                   -- teardown path stops the loading-spinner timer (no leak).
 
 -- Three selectable themes (cycle via menu bar). Colors are canvas {r,g,b,a}.
 -- Note: hs.canvas can't do real backdrop blur, so the frosted look is
@@ -717,13 +719,19 @@ local TH = THEMES.light  -- active palette; reassigned in createOverlay()
 
 -- Element indices (order matches createOverlay's appendElements calls):
 -- 1=panel bg; 2/3=lang chip bg/txt; 4/5=output; 6/7=enter; 8/9=model;
--- 10/11=refine; 12=dot; 13=timer; 14=transcript text; 15=close
+-- 10/11=refine; 12-16=level meter bars; 17=timer; 18=transcript text;
+-- 19=close; 20=loading spinner
 local EL = {
     langTxt = 3, outputTxt = 5,
     enterBg = 6, enterTxt = 7,
     modelTxt = 9, refineBg = 10, refineTxt = 11,
-    dot = 12, timer = 13, text = 14, close = 15,
+    meter = 12,  -- first of 5 bars (12..16); access as EL.meter + i
+    timer = 17, text = 18, close = 19, spinner = 20,
 }
+-- Level-meter geometry, in one table. (Lua caps a function at 200 locals; the
+-- init.lua main chunk is near that, so meter/spinner config + state are grouped
+-- into tables — METER here, `anim` below — rather than many separate locals.)
+local METER = { bars = 5, x = 344, w = 4, gap = 3, base = 27, min = 3, max = 16 }
 
 local function refreshOverlayLabels()
     if not overlay then return end
@@ -794,32 +802,47 @@ local function createOverlay()
     chip("model",  92, getModelName(),          false)         -- 8/9
     chip("refine", 64, "refine", true, getRefineMode() and hasOllama())  -- 10/11
 
-    -- 12: Recording dot (red reads as "recording" on every theme; alpha is
-    -- driven by startRecordingIndicator)
-    overlay:appendElements({
-        id = "dot", type = "oval", action = "fill",
-        fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 0.0 },
-        frame = { x = 372, y = 15, w = 8, h = 8 },
-    })
-    -- 13: Elapsed time
+    -- 12–16: Audio level meter (5 bars; replaces the old single dot). Bar height
+    -- tracks real mic input, so a dead/silent input device reads as flat bars.
+    -- Red reads as "recording" on every theme. Animated by startRecordingIndicator.
+    for i = 0, METER.bars - 1 do
+        overlay:appendElements({
+            id = "meter" .. i, type = "rectangle", action = "fill",
+            roundedRectRadii = { xRadius = 1.5, yRadius = 1.5 },
+            fillColor = { red = 1, green = 0.3, blue = 0.3, alpha = 0.0 },
+            frame = { x = METER.x + i * (METER.w + METER.gap), y = METER.base - METER.min, w = METER.w, h = METER.min },
+        })
+    end
+    -- 17: Elapsed time
     overlay:appendElements({
         id = "timer", type = "text", text = "",
         textColor = { red = 0.9, green = 0.3, blue = 0.3, alpha = 0.0 },
         textSize = 10, textAlignment = "right",
         frame = { x = 384, y = 11, w = 42, h = 16 },
     })
-    -- 14: Transcript text
+    -- 18: Transcript text (only "Listening..." in verbose/preview mode; minimal
+    -- mode leaves it empty — the meter and spinner carry the state visually)
     overlay:appendElements({
-        id = "text", type = "text", text = "Listening...",
+        id = "text", type = "text", text = getPreview() and "Listening..." or "",
         textColor = TH.text, textSize = 14,
         frame = { x = 13, y = 40, w = 434, h = 44 },
     })
-    -- 15: Close button (X) — last element so it renders on top and stays clickable
+    -- 19: Close button (X) — renders above the panel/chips so it stays clickable
     overlay:appendElements({
         id = "close", type = "text", text = "✕",
         textColor = TH.close, textSize = 15, textAlignment = "center",
         frame = { x = 434, y = 9, w = 16, h = 18 },
         trackMouseDown = true, trackMouseUp = true,
+    })
+    -- 20: Loading spinner (rotating arc) — shown during transcription. Centered in
+    -- the transcript area; hidden (alpha 0) until startSpinner runs. Not clickable,
+    -- and doesn't overlap the close button, so its render order is harmless.
+    overlay:appendElements({
+        id = "spinner", type = "arc",
+        center = { x = width / 2, y = 58 },
+        radius = 10, startAngle = 0, endAngle = 280,
+        action = "stroke", strokeWidth = 3,
+        strokeColor = { red = TH.text.red, green = TH.text.green, blue = TH.text.blue, alpha = 0.0 },
     })
 
     overlay:level(hs.canvas.windowLevels.floating)
@@ -869,11 +892,13 @@ end
 
 local function hideOverlay()
     if overlayPinned then return end  -- pinned overlay stays open
+    if stopSpinner then stopSpinner() end
     if overlay then overlay:delete(); overlay = nil end
 end
 
 local function forceHideOverlay()
     overlayPinned = false
+    if stopSpinner then stopSpinner() end
     if overlay then overlay:delete(); overlay = nil end
 end
 
@@ -901,11 +926,13 @@ local lastChunkCount = 0
 local menuBar = nil
 
 -- Recording indicator state
-local pulseTimer = nil
 local clockTimer = nil
 local recordingStartTime = 0
-local pulseAlpha = 1.0
-local pulseFading = true
+
+-- Audio level meter + loading spinner runtime state (grouped into one table; see
+-- METER above for why). phase = meter traveling-wave; level = 0..1 mic envelope
+-- from checkSilence; spinAngle = spinner rotation.
+local anim = { meterTimer = nil, phase = 0, level = 0, spinTimer = nil, spinAngle = 0 }
 
 -- Undo state
 local lastInsertedText = nil
@@ -1175,30 +1202,36 @@ local function createMenuBar()
 end
 
 --------------------------------------------------------------------------------
--- Recording indicator (pulsing dot + timer)
+-- Recording indicator (audio level meter + timer)
 --------------------------------------------------------------------------------
 
 local function startRecordingIndicator()
     if not overlay then return end
     recordingStartTime = hs.timer.secondsSinceEpoch()
-    pulseAlpha = 1.0
-    pulseFading = true
+    anim.phase = 0
+    anim.level = 0
 
-    -- Show dot and timer
-    overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 1.0 }
+    -- Show meter bars and timer
+    for i = 0, METER.bars - 1 do
+        overlay[EL.meter + i].fillColor = { red = 1, green = 0.3, blue = 0.3, alpha = 1.0 }
+    end
     overlay[EL.timer].textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 1.0 }
 
-    -- Pulse the red dot
-    pulseTimer = hs.timer.doEvery(0.05, function()
+    -- Animate the bars: height = real measured level (anim.level, set by
+    -- checkSilence) × a per-bar traveling wave. Flat when there's no input, so a
+    -- dead mic reads as flat; bouncing when audio is coming in.
+    anim.meterTimer = hs.timer.doEvery(0.07, function()
         if not overlay then return end
-        if pulseFading then
-            pulseAlpha = pulseAlpha - 0.03
-            if pulseAlpha <= 0.2 then pulseFading = false end
-        else
-            pulseAlpha = pulseAlpha + 0.03
-            if pulseAlpha >= 1.0 then pulseFading = true end
+        for i = 0, METER.bars - 1 do
+            local wob = 0.3 + 0.7 * (0.5 + 0.5 * math.sin(anim.phase + i * 1.1))
+            local h = METER.min + (METER.max - METER.min) * anim.level * wob
+            if h < METER.min then h = METER.min end
+            overlay[EL.meter + i].frame = {
+                x = METER.x + i * (METER.w + METER.gap),
+                y = METER.base - h, w = METER.w, h = h,
+            }
         end
-        overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = pulseAlpha }
+        anim.phase = anim.phase + 0.55
     end)
 
     -- Update elapsed time every second
@@ -1212,13 +1245,46 @@ local function startRecordingIndicator()
 end
 
 local function stopRecordingIndicator()
-    if pulseTimer then pulseTimer:stop(); pulseTimer = nil end
+    if anim.meterTimer then anim.meterTimer:stop(); anim.meterTimer = nil end
     if clockTimer then clockTimer:stop(); clockTimer = nil end
+    anim.level = 0
     if overlay then
-        overlay[EL.dot].fillColor = { red = 1, green = 0.15, blue = 0.15, alpha = 0.0 }
+        for i = 0, METER.bars - 1 do
+            overlay[EL.meter + i].fillColor = { red = 1, green = 0.3, blue = 0.3, alpha = 0.0 }
+        end
         overlay[EL.timer].textColor = { red = 1, green = 0.4, blue = 0.4, alpha = 0.0 }
         overlay[EL.timer].text = ""
     end
+end
+
+-- Loading spinner (rotating arc) shown during transcription in minimal mode.
+-- stopSpinner is the forward-declared local from the top of the file, so
+-- hideOverlay/forceHideOverlay can stop the timer on every teardown path.
+local function startSpinner()
+    if not overlay or anim.spinTimer then return end
+    anim.spinAngle = 0
+    overlay[EL.spinner].strokeColor = { red = TH.text.red, green = TH.text.green, blue = TH.text.blue, alpha = 0.85 }
+    anim.spinTimer = hs.timer.doEvery(0.04, function()
+        if not overlay then return end
+        anim.spinAngle = (anim.spinAngle + 11) % 360
+        overlay[EL.spinner].startAngle = anim.spinAngle
+        overlay[EL.spinner].endAngle = anim.spinAngle + 280
+    end)
+end
+
+stopSpinner = function()
+    if anim.spinTimer then anim.spinTimer:stop(); anim.spinTimer = nil end
+    if overlay then
+        overlay[EL.spinner].strokeColor = { red = 0, green = 0, blue = 0, alpha = 0.0 }
+    end
+end
+
+-- Show an error in the overlay (always visible, both modes), stop the spinner so
+-- it isn't spinning over the message, then auto-hide.
+local function showOverlayError(msg)
+    stopSpinner()
+    setOverlayText(msg)
+    hs.timer.doAfter(2, hideOverlay)
 end
 
 --------------------------------------------------------------------------------
@@ -1359,11 +1425,18 @@ local function finishInsertion(text, detectedLang)
     end
     saveRecentDictations()
 
-    local display = finalText
-    if detectedLang then display = display .. " [" .. detectedLang:upper() .. "]" end
-    setOverlayText(display)
     playDoneSound()
-    hs.timer.doAfter(OVERLAY_LINGER, hideOverlay)
+    if getPreview() then
+        -- Verbose mode: show the final text in the overlay, then linger and hide.
+        local display = finalText
+        if detectedLang then display = display .. " [" .. detectedLang:upper() .. "]" end
+        setOverlayText(display)
+        hs.timer.doAfter(OVERLAY_LINGER, hideOverlay)
+    else
+        -- Minimal mode: text is already in the input box — just close (stops the
+        -- spinner via hideOverlay).
+        hideOverlay()
+    end
 end
 
 -- Insert transcribed text at cursor, with post-processing, optional LLM refinement, and action hooks
@@ -1383,7 +1456,7 @@ local function insertTranscribedText(text, detectedLang)
 
     -- Optional LLM refinement (async, skips short text and voice commands)
     if not isVoiceCommand and getRefineMode() and #text >= REFINE_MIN_CHARS then
-        setOverlayText("Refining...")
+        if getPreview() then setOverlayText("Refining...") end  -- minimal: spinner keeps running
         refineWithOllama(text, function(refined)
             finishInsertion(refined, detectedLang)
         end)
@@ -1400,7 +1473,9 @@ local function doFinalTranscription()
         return
     end
 
-    setOverlayText("Transcribing...")
+    -- Minimal mode: a loading spinner instead of status text. Verbose mode keeps
+    -- the textual status. (The recording-phase meter has already stopped.)
+    if getPreview() then setOverlayText("Transcribing...") else startSpinner() end
 
     local concatFile = WHISPER_TMP .. "/concat.txt"
     local f = io.open(concatFile, "w")
@@ -1416,8 +1491,7 @@ local function doFinalTranscription()
     local concatTask = hs.task.new(FFMPEG, function(code)
         if code ~= 0 then
             log("final: concat failed")
-            setOverlayText("Error: concat failed")
-            hs.timer.doAfter(2, hideOverlay)
+            showOverlayError("Error: concat failed")
             return
         end
 
@@ -1430,8 +1504,7 @@ local function doFinalTranscription()
             local whisperTask = hs.task.new(WHISPER_BIN, function(code2, out2, err2)
                 if code2 ~= 0 then
                     log("final: whisper failed")
-                    setOverlayText("Error: transcription failed")
-                    hs.timer.doAfter(2, hideOverlay)
+                    showOverlayError("Error: transcription failed")
                     return
                 end
 
@@ -1454,14 +1527,13 @@ local function doFinalTranscription()
                     -- Detected language not in preferred list — re-transcribe with first preferred
                     local fallback = preferred[1]
                     log("auto-detect got '" .. tostring(detected) .. "', re-running with " .. fallback)
-                    setOverlayText("Re-transcribing (" .. fallback:upper() .. ")...")
+                    if getPreview() then setOverlayText("Re-transcribing (" .. fallback:upper() .. ")...") end
                     local retryArgs = { "-m", getModelPath(), "-f", finalWav, "-l", fallback, "-nt", "--no-prints" }
                     for _, a in ipairs(promptArgs) do table.insert(retryArgs, a) end
                     local retryTask = hs.task.new(WHISPER_BIN, function(code3, out3)
                         if code3 ~= 0 then
                             log("final: retry whisper failed")
-                            setOverlayText("Error: transcription failed")
-                            hs.timer.doAfter(2, hideOverlay)
+                            showOverlayError("Error: transcription failed")
                             return
                         end
                         local text = (out3 or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
@@ -1479,8 +1551,7 @@ local function doFinalTranscription()
             local whisperTask = hs.task.new(WHISPER_BIN, function(code2, out2)
                 if code2 ~= 0 then
                     log("final: whisper failed")
-                    setOverlayText("Error: transcription failed")
-                    hs.timer.doAfter(2, hideOverlay)
+                    showOverlayError("Error: transcription failed")
                     return
                 end
                 local text = (out2 or ""):gsub("^%s+", ""):gsub("%s+$", ""):gsub("%s+", " ")
@@ -1514,6 +1585,12 @@ local function checkSilence()
         local maxVol = (err or ""):match("max_volume:%s*([-%.%d]+)")
         if maxVol then
             maxVol = tonumber(maxVol)
+            -- Drive the level meter: map dB [-60..-10] → [0..1]. A dead/silent
+            -- input device sits near -90dB → ~0 → flat bars.
+            if maxVol then
+                local lvl = (maxVol + 60) / 50
+                anim.level = lvl < 0 and 0 or (lvl > 1 and 1 or lvl)
+            end
             if maxVol and maxVol < AUTO_STOP_THRESHOLD_DB then
                 silentChunkCount = silentChunkCount + 1
                 log("silence: chunk " .. completed .. " vol=" .. maxVol .. "dB (count=" .. silentChunkCount .. ")")

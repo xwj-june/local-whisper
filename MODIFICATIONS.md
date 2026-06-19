@@ -73,6 +73,35 @@ model on release), so it's now opt-in:
 - Stored in `~/.local-whisper/preview` (`on`/`off`); added `getPreview()` /
   `setPreview()`.
 
+### `hammerspoon/init.lua` — minimal overlay: level meter + loading spinner
+
+The overlay's textual states (`Listening...` / `Transcribing...` / `Refining...`
+and the lingering final-result text) are now coupled to the **Live preview**
+toggle. With preview **off** (default) the overlay is purely visual:
+
+- **Recording:** an audio **level meter** (5 bars) replaces the old single red
+  dot. Bar height tracks the real mic level measured by `checkSilence` (dB →
+  0..1), so a dead/silent input device reads as flat bars — confirming the mic
+  is actually being heard. Bars animate via a per-bar traveling wave scaled by
+  that level. (~1 s latency, since the level comes from the 1 s silence-check.)
+- **Transcribing:** a rotating-arc **loading spinner** instead of status text.
+- **Done:** the text goes straight into the input box and the overlay closes —
+  no result is shown in the overlay.
+
+With preview **on**, the old verbose text behavior is kept (partial transcript,
+status strings, lingering result). Errors are always shown as text in both modes.
+
+Implementation notes:
+- New canvas elements: 5 meter bars (`EL.meter`+0..4) and an `arc` spinner
+  (`EL.spinner`); `EL` indices updated. `startRecordingIndicator` animates the
+  meter; `startSpinner`/`stopSpinner` drive the arc, with `stopSpinner`
+  forward-declared and called from `hideOverlay`/`forceHideOverlay` so every
+  teardown path stops the timer.
+- Meter geometry/state are grouped into `METER` / `anim` **tables** rather than
+  separate locals: the init.lua main chunk is near Lua's 200-locals-per-function
+  cap, and adding ~11 separate locals pushed it over (reload failed at load time
+  and took out the `hs` IPC port until a full Hammerspoon restart).
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

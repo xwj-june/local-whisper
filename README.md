@@ -9,7 +9,7 @@ Hold **Right Cmd**, speak, release — text appears at your cursor.
 - **Hold-to-dictate**: Hold a modifier key to record, release to transcribe and insert
 - **Voice commands**: Say "voice command note buy coffee" to save a note, "voice command open app Safari" to launch apps, and more — fully customizable
 - **Live preview** (off by default): Optional rough partial transcription in the overlay while you speak — a liveness indicator, toggle on from the menu bar
-- **Recording indicator**: Pulsing red dot and elapsed timer in the overlay
+- **Recording indicator**: Audio level meter (bars that move with your voice, flat if the mic is dead) and elapsed timer in the overlay
 - **Multi-language**: English, Chinese (Simplified), and auto-detect with preferred-language fallback
 - **App-aware processing**: Auto-capitalizes in most apps, skips in terminals and code editors
 - **LLM refinement** (optional): Clean up dictated text with a local LLM via [Ollama](https://ollama.com) — fixes punctuation, removes filler words, formats numbered lists
@@ -171,28 +171,40 @@ file in `~/.local-whisper/`.
 
 ### The overlay
 
-While recording, a panel appears at the **bottom-center** of the screen with a
-pulsing red dot, the elapsed timer, and a row of clickable **chips** (language,
-output, ⏎, model, refine). Click a chip to cycle that setting; the toggle chips
-(⏎, refine) fill with the accent color when on. Click the empty panel to **pin**
-it open; click **✕** to cancel.
+While recording, a panel appears at the **bottom-center** of the screen with an
+audio **level meter**, the elapsed timer, and a row of clickable **chips**
+(language, output, ⏎, model, refine). Click a chip to cycle that setting; the
+toggle chips (⏎, refine) fill with the accent color when on. Click the empty
+panel to **pin** it open; click **✕** to cancel.
+
+The **level meter** (5 bars) shows that your microphone is actually being heard:
+the bars rise and fall with your voice, and stay **flat** when there's no input —
+so if your input device is broken or muted, you'll see flat bars instead of false
+reassurance. (The level is sampled about once a second, so it reacts with a short
+lag.)
+
+After you release the key, the overlay shows a **loading spinner** while it
+transcribes, then the text drops into your input box and the overlay closes.
 
 ### Live preview
 
-Off by default. When on (menu bar → **Live preview**), the overlay shows a rough,
-running transcription while you talk. It's only a *liveness indicator* — proof
-the mic is being heard — **not** the text you'll get:
+Off by default. The **Live preview** toggle (menu bar) controls how much the
+overlay tells you while it works:
 
-- It uses the fastest, least-accurate model (`tiny`) and refreshes every couple
-  of seconds, so it lags and often misreads what you said.
-- The text you actually receive is **re-transcribed from scratch** with your
-  chosen model (`medium`) the moment you release the key — the preview is thrown
-  away.
+- **Off (default):** the visual-only experience above — level meter while
+  recording, spinner while transcribing, then the text appears in your input box.
+  Nothing is shown in the overlay itself.
+- **On:** the overlay also shows a rough, running transcription while you talk,
+  plus `Transcribing…` / `Refining…` status and the final text. This is only a
+  *liveness indicator*, **not** the text you'll get — it uses the fastest,
+  least-accurate model (`tiny`), refreshes every couple of seconds, and is
+  **thrown away**: the text you actually receive is re-transcribed from scratch
+  with your chosen model (`medium`) when you release the key.
 
 It's off by default because on a fast machine the final result lands in a few
 seconds anyway, and a laggy, wrong preview tends to distract more than it helps.
-Turn it on if you like seeing that something's happening while you speak. Stored
-in `~/.local-whisper/preview` (`on` / `off`).
+Errors are always shown as text, in either mode. Stored in
+`~/.local-whisper/preview` (`on` / `off`).
 
 ### Cancel a dictation
 

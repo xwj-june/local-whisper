@@ -52,3 +52,4 @@ See [MODIFICATIONS.md](MODIFICATIONS.md) for details.
 - [x] Configurable completion sound (menu bar submenu)
 - [x] Esc / ✕ to cancel a dictation (insert nothing)
 - [x] Live preview off by default, toggleable from the menu bar
+- [x] Minimal overlay: audio level meter while recording + loading spinner while transcribing
