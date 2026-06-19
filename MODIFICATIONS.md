@@ -35,6 +35,18 @@ Reworked the dictation overlay (`createOverlay` / `refreshOverlayLabels`):
   old hover-to-recolor behavior (state is now always visible from the fill).
 - Added `getTheme()` / `cycleTheme()` helpers.
 
+### `hammerspoon/init.lua` — configurable completion sound
+
+The "text inserted" sound was hardcoded to `Glass.aiff`. Made it configurable:
+
+- Stored in `~/.local-whisper/sound` as a macOS system-sound name
+  (e.g. `Hero`) or `off`; default `Glass`.
+- Menu bar gains a **Done sound** submenu listing the system sounds + Off;
+  picking one previews it and saves the choice.
+- Added `getSound()` / `setSound()` / `playDoneSound()`; `finishInsertion`
+  now calls `playDoneSound()`.
+- (Start/stop sounds remain `Pop` / `Tink`, not yet configurable.)
+
 ## Runtime config changes (NOT in this repo — machine-local)
 
 These live in `~/.local-whisper/` and are per-machine user settings, so they

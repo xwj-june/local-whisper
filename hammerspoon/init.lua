@@ -395,6 +395,33 @@ local function cycleTheme()
     return next
 end
 
+-- Completion sound (played after text is inserted). Stored in
+-- ~/.local-whisper/sound as a macOS system-sound name (e.g. "Glass") or "off".
+local SOUND_FILE = CONFIG_DIR .. "/sound"
+local SOUND_DIR = "/System/Library/Sounds/"
+local DEFAULT_SOUND = "Glass"
+local SOUND_CHOICES = {
+    "Basso", "Blow", "Bottle", "Frog", "Funk", "Glass", "Hero",
+    "Morse", "Ping", "Pop", "Purr", "Sosumi", "Submarine", "Tink",
+}
+
+local function getSound()
+    local s = readFile(SOUND_FILE):gsub("%s+", "")
+    if s == "" then return DEFAULT_SOUND end
+    return s
+end
+
+local function setSound(name)
+    writeFile(SOUND_FILE, name)
+end
+
+local function playDoneSound()
+    local name = getSound()
+    if name == "off" then return end
+    local snd = hs.sound.getByFile(SOUND_DIR .. name .. ".aiff")
+    if snd then snd:play() end
+end
+
 local function cycleEnter()
     local next = getEnterMode() and "off" or "on"
     writeFile(ENTER_FILE, next)
@@ -1043,6 +1070,27 @@ local function buildMenuBarMenu()
         end,
     })
 
+    -- Completion sound (submenu: pick a system sound or Off; picking previews it)
+    local currentSound = getSound()
+    local soundItems = {}
+    for _, name in ipairs(SOUND_CHOICES) do
+        table.insert(soundItems, {
+            title = name,
+            checked = (currentSound == name),
+            fn = function() setSound(name); playDoneSound(); updateMenuBar() end,
+        })
+    end
+    table.insert(soundItems, { title = "-" })
+    table.insert(soundItems, {
+        title = "Off",
+        checked = (currentSound == "off"),
+        fn = function() setSound("off"); updateMenuBar() end,
+    })
+    table.insert(items, {
+        title = "Done sound: " .. (currentSound == "off" and "Off" or currentSound),
+        menu = soundItems,
+    })
+
     -- Settings overlay
     table.insert(items, {
         title = "Settings...",
@@ -1297,7 +1345,7 @@ local function finishInsertion(text, detectedLang)
     local display = finalText
     if detectedLang then display = display .. " [" .. detectedLang:upper() .. "]" end
     setOverlayText(display)
-    hs.sound.getByFile("/System/Library/Sounds/Glass.aiff"):play()
+    playDoneSound()
     hs.timer.doAfter(OVERLAY_LINGER, hideOverlay)
 end
 
