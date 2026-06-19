@@ -195,7 +195,7 @@ end
 
 local function getLang()
     local lang = readFile(LANG_FILE):gsub("%s+", "")
-    if lang == "en" or lang == "pt" or lang == "auto" then return lang end
+    if lang == "en" or lang == "zh" or lang == "auto" then return lang end
     return "en"
 end
 
@@ -352,7 +352,7 @@ end
 
 -- Cycle helpers
 local function cycleLang()
-    local cycle = { en = "pt", pt = "auto", auto = "en" }
+    local cycle = { en = "zh", zh = "auto", auto = "en" }
     local next = cycle[getLang()] or "en"
     writeFile(LANG_FILE, next)
     return next
