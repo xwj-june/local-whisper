@@ -1005,6 +1005,432 @@ end
 
 loadRecentDictations()
 
+--------------------------------------------------------------------------------
+-- Dictation stats (counting, persistence, dashboard webview)
+-- All module state/functions live on this single table. It is a GLOBAL (not a
+-- `local`) on purpose: the init.lua main chunk is already at Lua's hard limit of
+-- 200 locals, so adding even one more top-level `local` tips the whole reload
+-- over (MAXVARS) — same convention as the existing `WhisperActions` / `_whisper`
+-- globals. Assigned before buildMenuBarMenu / finishInsertion / stopRecording so
+-- those functions can reference it (Lua local scope starts after the declaration
+-- line — see AGENTS.md).
+--------------------------------------------------------------------------------
+stats = {
+    file = CONFIG_DIR .. "/stats.json",
+    data = { since = nil, days = {} },   -- in-memory copy; mutated in place
+    lastRecordingSeconds = 0,            -- stashed by stopRecording for the next record
+    webview = nil,                       -- retained so it survives GC
+}
+
+-- Count words from a string using the hybrid CJK rule:
+--   zh = number of CJK codepoints (ideographs + kana)
+--   en = number of maximal runs of ASCII word chars (%w)
+--   words = zh + en
+-- Returns a table { words, zh, en }.
+function stats.count(text)
+    text = text or ""
+    local zh = 0
+    -- CJK by codepoint range via utf8.codes. Ranges:
+    --   0x4E00-0x9FFF  CJK Unified Ideographs
+    --   0x3400-0x4DBF  CJK Extension A
+    --   0x3040-0x30FF  Hiragana + Katakana (common kana)
+    local ok = pcall(function()
+        for _, cp in utf8.codes(text) do
+            if (cp >= 0x4E00 and cp <= 0x9FFF)
+                or (cp >= 0x3400 and cp <= 0x4DBF)
+                or (cp >= 0x3040 and cp <= 0x30FF) then
+                zh = zh + 1
+            end
+        end
+    end)
+    if not ok then zh = 0 end  -- malformed UTF-8: don't crash, just skip CJK
+
+    -- en = runs of ASCII letters/digits. CJK chars are multi-byte and their
+    -- continuation bytes are >= 0x80, so %w (ASCII word chars) never matches
+    -- inside them — Latin/number runs are counted cleanly.
+    local en = 0
+    for _ in text:gmatch("%w+") do
+        en = en + 1
+    end
+
+    return { words = zh + en, zh = zh, en = en }
+end
+
+-- Load stats.json into stats.data (in place). On any failure, start fresh.
+function stats.load()
+    local f = io.open(stats.file, "r")
+    if not f then return end
+    local raw = f:read("*a"); f:close()
+    if not raw or raw == "" then return end
+    local ok, result = pcall(hs.json.decode, raw)
+    if ok and type(result) == "table" and type(result.days) == "table" then
+        stats.data.since = result.since
+        -- repopulate days in place (preserve the table reference)
+        for k in pairs(stats.data.days) do stats.data.days[k] = nil end
+        for k, v in pairs(result.days) do stats.data.days[k] = v end
+    else
+        log("stats: decode failed, starting fresh")
+    end
+end
+
+-- Atomic write: encode to a temp file in the same dir, then os.rename over the
+-- real file (rename within a filesystem is atomic — a crash mid-write can never
+-- leave a truncated stats.json).
+function stats.save()
+    local ok, json = pcall(hs.json.encode, stats.data)
+    if not ok then log("stats: encode failed"); return end
+    local tmp = stats.file .. ".tmp"
+    local f = io.open(tmp, "w")
+    if not f then log("stats: cannot open temp file"); return end
+    f:write(json); f:close()
+    local renamed, err = os.rename(tmp, stats.file)
+    if not renamed then log("stats: rename failed: " .. tostring(err)) end
+end
+
+-- Record one completed dictation into today's bucket and persist.
+function stats.record(text, seconds)
+    local c = stats.count(text)
+    if c.words == 0 and (seconds or 0) <= 0 then return end  -- nothing to record
+    local day = os.date("%Y-%m-%d")
+    if not stats.data.since then stats.data.since = day end
+    local b = stats.data.days[day]
+    if not b then
+        b = { words = 0, zh = 0, en = 0, seconds = 0, count = 0 }
+        stats.data.days[day] = b
+    end
+    b.words = b.words + c.words
+    b.zh = b.zh + c.zh
+    b.en = b.en + c.en
+    b.seconds = b.seconds + math.floor(seconds or 0)
+    b.count = b.count + 1
+    stats.save()
+    log(string.format("stats: +%d words (%dzh/%den) %.0fs on %s", c.words, c.zh, c.en, seconds or 0, day))
+end
+
+-- Sum all day buckets into all-time totals + derived metrics.
+-- Returns { words, zh, en, seconds, count, activeDays, avg, best={words,date}, since }.
+function stats.allTime()
+    local t = { words = 0, zh = 0, en = 0, seconds = 0, count = 0, activeDays = 0,
+                avg = 0, best = { words = 0, date = nil }, since = stats.data.since }
+    for date, b in pairs(stats.data.days) do
+        t.words = t.words + (b.words or 0)
+        t.zh = t.zh + (b.zh or 0)
+        t.en = t.en + (b.en or 0)
+        t.seconds = t.seconds + (b.seconds or 0)
+        t.count = t.count + (b.count or 0)
+        t.activeDays = t.activeDays + 1
+        if (b.words or 0) > t.best.words then
+            t.best.words = b.words or 0
+            t.best.date = date
+        end
+    end
+    if t.activeDays > 0 then t.avg = math.floor(t.words / t.activeDays) end
+    return t
+end
+
+-- Today's bucket (or a zeroed one if none yet).
+function stats.today()
+    return stats.data.days[os.date("%Y-%m-%d")]
+        or { words = 0, zh = 0, en = 0, seconds = 0, count = 0 }
+end
+
+-- Format a thousands-separated integer, e.g. 186540 -> "186,540".
+function stats.fmtNum(n)
+    local s = tostring(math.floor(n or 0))
+    local out = s:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (out:gsub("^,", ""))
+end
+
+-- Format seconds as a compact duration: <1h -> "14:32" (mm:ss), >=1h -> "19h 47m".
+function stats.fmtTime(sec)
+    sec = math.floor(sec or 0)
+    if sec >= 3600 then
+        return string.format("%dh %dm", math.floor(sec / 3600), math.floor((sec % 3600) / 60))
+    end
+    return string.format("%d:%02d", math.floor(sec / 60), sec % 60)
+end
+
+-- Words recorded on a given "YYYY-MM-DD" (0 if no bucket).
+function stats.wordsOn(dateStr)
+    local b = stats.data.days[dateStr]
+    return b and (b.words or 0) or 0
+end
+
+-- Format a "YYYY-MM-DD" string as "Mon DD" (e.g. "Jun 19"). Returns "" for nil.
+function stats.fmtDate(dateStr)
+    if not dateStr then return "" end
+    local y, m, d = dateStr:match("(%d+)-(%d+)-(%d+)")
+    if not y then return dateStr end
+    local t = os.time({ year = tonumber(y), month = tonumber(m), day = tonumber(d), hour = 12 })
+    return os.date("%b %-d", t)
+end
+
+-- Minimal HTML escaping for any text injected into the page.
+function stats.esc(s)
+    return (tostring(s or ""):gsub("[&<>]", { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;" }))
+end
+
+-- Build the dashboard HTML with real numbers injected. Static snapshot.
+function stats.html()
+    local today = stats.today()
+    local all = stats.allTime()
+    local fnum, ftime, fdate = stats.fmtNum, stats.fmtTime, stats.fmtDate
+
+    -- now (noon today) as the anchor for both charts, walking back by whole days
+    local nowParts = os.date("*t")
+    local todayKey = os.date("%Y-%m-%d")
+    local function dayKey(offsetDays)
+        local t = os.time({ year = nowParts.year, month = nowParts.month,
+                            day = nowParts.day - offsetDays, hour = 12 })
+        return os.date("%Y-%m-%d", t), os.date("*t", t)
+    end
+
+    -- 14-day bar chart (oldest -> today). Heights relative to the window max.
+    local WDAY = { "S", "M", "T", "W", "T", "F", "S" }  -- os.date wday: 1=Sun..7=Sat
+    local barMax = 1
+    local barDays = {}
+    for i = 13, 0, -1 do
+        local key, t = dayKey(i)
+        local w = stats.wordsOn(key)
+        if w > barMax then barMax = w end
+        barDays[#barDays + 1] = { key = key, words = w, wday = t.wday }
+    end
+    local barsHTML = {}
+    for _, dd in ipairs(barDays) do
+        local pct = math.floor((dd.words / barMax) * 100 + 0.5)
+        if dd.words > 0 and pct < 4 then pct = 4 end  -- keep tiny days visible
+        local isToday = (dd.key == todayKey)
+        barsHTML[#barsHTML + 1] = string.format(
+            '<div class="col%s"><div class="bar" style="height:%d%%"></div><div class="d mono">%s</div></div>',
+            isToday and " today" or "", pct, WDAY[dd.wday])
+    end
+
+    -- Activity heatmap: 17 columns (weeks) x 7 rows (Sun..Sat). The last column
+    -- ends on today; future cells in the current week stay empty. Intensity is
+    -- 5 buckets relative to the busiest day in the window.
+    local WEEKS = 17
+    -- offset of today from the start of its week (Sun=0..Sat=6)
+    local todayWdayIdx = nowParts.wday - 1
+    local heatMax = 1
+    local heatCells = {}  -- [col][row] = { words, future }
+    for col = 0, WEEKS - 1 do
+        heatCells[col] = {}
+        for row = 0, 6 do
+            -- days back from today: full weeks to the right + within-week offset
+            local back = (WEEKS - 1 - col) * 7 + (todayWdayIdx - row)
+            if back < 0 then
+                heatCells[col][row] = { words = 0, future = true }
+            else
+                local key = dayKey(back)
+                local w = stats.wordsOn(key)
+                if w > heatMax then heatMax = w end
+                heatCells[col][row] = { words = w, future = false }
+            end
+        end
+    end
+    local function heatLevel(w)
+        if w <= 0 then return 0 end
+        local r = w / heatMax
+        if r < 0.25 then return 1 elseif r < 0.50 then return 2
+        elseif r < 0.80 then return 3 else return 4 end
+    end
+    local heatHTML = {}
+    for col = 0, WEEKS - 1 do
+        local cells = {}
+        for row = 0, 6 do
+            local c = heatCells[col][row]
+            if c.future then
+                cells[#cells + 1] = '<div class="cell"></div>'
+            else
+                local lvl = heatLevel(c.words)
+                cells[#cells + 1] = string.format('<div class="cell%s"></div>',
+                    lvl > 0 and (" l" .. lvl) or "")
+            end
+        end
+        heatHTML[#heatHTML + 1] = '<div class="week">' .. table.concat(cells) .. '</div>'
+    end
+    -- month labels across the heatmap span
+    local startKey = dayKey((WEEKS - 1) * 7 + todayWdayIdx)
+    local sy, sm = startKey:match("(%d+)-(%d+)")
+    local months = {}
+    local seen = {}
+    for i = 0, 3 do
+        local mt = os.time({ year = tonumber(sy), month = tonumber(sm) + i, day = 1, hour = 12 })
+        local lbl = os.date("%b", mt)
+        if not seen[lbl] then seen[lbl] = true; months[#months + 1] = "<span>" .. lbl .. "</span>" end
+    end
+
+    -- empty state hint
+    local emptyNote = ""
+    if all.count == 0 then
+        emptyNote = '<p class="note" style="color:var(--accent)">No dictations recorded yet — start dictating and they\'ll show up here.</p>'
+    end
+
+    local bestLabel = all.best.date and ("best day · " .. fdate(all.best.date)) or "best day"
+    local sinceLabel = all.since and ("tracking since " .. fdate(all.since)) or "tracking since —"
+
+    return string.format([[<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Dictation stats</title>
+<style>
+  :root{
+    --ground:#0f1115;--panel:#181b22;--panel-2:#1f232c;--line:#282d38;
+    --text:#e8eaef;--muted:#878d9b;--accent:#ff5a52;--accent-dim:#7a302e;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--panel);font-family:system-ui,-apple-system,"PingFang SC","Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;color:var(--text)}
+  .mono{font-family:ui-monospace,"SF Mono",Menlo,monospace}
+  .body{padding:20px 22px 22px}
+  .eyebrow{font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--muted)}
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px}
+  .block{background:var(--panel-2);border:1px solid var(--line);border-radius:13px;padding:15px 16px 16px}
+  .block.today{border-color:var(--accent-dim)}
+  .block .hd{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+  .block.today .eyebrow{color:var(--accent)}
+  .pill{font-size:10px;color:var(--accent);border:1px solid var(--accent-dim);border-radius:99px;padding:1px 7px}
+  .big{font-size:36px;line-height:1;font-weight:600;letter-spacing:-.02em}
+  .big .u{font-size:13px;color:var(--muted);font-weight:500;margin-left:5px;letter-spacing:0}
+  .block.today .big{color:var(--accent)}
+  .brk{font-size:11px;color:var(--muted);margin-top:7px}
+  .brk .sep{opacity:.45;margin:0 5px}
+  .subs{display:flex;gap:18px;margin-top:13px}
+  .sub .n{font-size:15px;font-weight:600}
+  .sub .l{font-size:10.5px;color:var(--muted);margin-top:1px}
+  .chart{display:flex;align-items:flex-end;gap:6px;height:96px;padding-top:6px}
+  .col{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;height:100%%;justify-content:flex-end}
+  .bar{width:100%%;max-width:15px;border-radius:3px 3px 2px 2px;background:var(--accent-dim);min-height:2px}
+  .col.today .bar{background:var(--accent)}
+  .col .d{font-size:9px;color:var(--muted)}
+  .col.today .d{color:var(--accent)}
+  .heatwrap{margin-top:6px}
+  .hint{font-size:10px;color:var(--muted);margin-bottom:9px}
+  .months{display:flex;gap:32px;font-size:9px;color:var(--muted);margin:0 0 5px 20px;font-family:ui-monospace,Menlo,monospace}
+  .heatrow{display:flex;gap:6px;align-items:flex-start}
+  .wdays{display:flex;flex-direction:column;justify-content:space-between;height:95px;font-size:8px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .heat{display:flex;gap:3px}
+  .week{display:flex;flex-direction:column;gap:3px}
+  .cell{width:11px;height:11px;border-radius:2px;background:#232730}
+  .cell.l1{background:#5e2422}.cell.l2{background:#8f2f2b}.cell.l3{background:#cc433c}.cell.l4{background:#ff5a52}
+  .heatlegend{display:flex;align-items:center;gap:4px;justify-content:flex-end;margin-top:9px;font-size:9px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .heatlegend i{width:11px;height:11px;border-radius:2px;display:inline-block}
+  .tabs{display:flex;align-items:center;gap:5px;margin:6px 0 16px}
+  .tab{font-family:ui-monospace,Menlo,monospace;font-size:11px;letter-spacing:.03em;color:var(--muted);background:none;border:1px solid transparent;border-radius:8px;padding:5px 12px;cursor:pointer}
+  .tab:hover{color:var(--text)}
+  .tab.active{color:var(--accent);background:rgba(255,90,82,.10);border-color:var(--accent-dim)}
+  .tab-meta{margin-left:auto;font-size:10px;color:var(--muted);font-family:ui-monospace,Menlo,monospace}
+  .pane.hidden{display:none}
+  .foot{display:flex;gap:8px;margin-top:24px;flex-wrap:wrap}
+  .stat{flex:1;min-width:120px;background:var(--panel-2);border:1px solid var(--line);border-radius:11px;padding:11px 13px}
+  .stat .n{font-size:16px;font-weight:600}
+  .stat .l{font-size:10.5px;color:var(--muted);margin-top:2px}
+  .note{margin-top:16px;font-size:11px;color:var(--muted);text-align:center;line-height:1.5}
+</style></head>
+<body>
+  <div class="body">
+    <div class="split">
+      <div class="block today">
+        <div class="hd"><span class="eyebrow">Today</span><span class="pill mono">%s</span></div>
+        <div class="big mono">%s<span class="u">words</span></div>
+        <div class="brk mono">%s 中文<span class="sep">·</span>%s 英文词</div>
+        <div class="subs">
+          <div class="sub"><div class="n mono">%s</div><div class="l">time</div></div>
+          <div class="sub"><div class="n mono">%s</div><div class="l">dictations</div></div>
+        </div>
+      </div>
+      <div class="block">
+        <div class="hd"><span class="eyebrow">All time</span></div>
+        <div class="big mono">%s<span class="u">words</span></div>
+        <div class="brk mono">%s 中文<span class="sep">·</span>%s 英文词</div>
+        <div class="subs">
+          <div class="sub"><div class="n mono">%s</div><div class="l">time</div></div>
+          <div class="sub"><div class="n mono">%s</div><div class="l">dictations</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-tab="bars">14 days</button>
+      <button class="tab" data-tab="heat">Activity</button>
+      <span class="tab-meta">words / day</span>
+    </div>
+
+    <div class="pane" id="pane-bars">
+      <div class="chart">%s</div>
+    </div>
+
+    <div class="pane hidden" id="pane-heat">
+      <div class="heatwrap">
+        <div class="hint mono">last 17 weeks</div>
+        <div class="months">%s</div>
+        <div class="heatrow">
+          <div class="wdays"><span>M</span><span>W</span><span>F</span></div>
+          <div class="heat" id="heat">%s</div>
+        </div>
+        <div class="heatlegend">Less <i class="cell"></i><i class="cell l1"></i><i class="cell l2"></i><i class="cell l3"></i><i class="cell l4"></i> More</div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div class="stat"><div class="n mono">%s</div><div class="l">avg / active day</div></div>
+      <div class="stat"><div class="n mono">%s</div><div class="l">%s</div></div>
+      <div class="stat"><div class="n mono">%s days</div><div class="l">%s</div></div>
+    </div>
+    %s
+    <p class="note">Counts text inserted at the cursor · cancelled dictations excluded · stored on this Mac only</p>
+  </div>
+
+  <script>
+  (function(){
+    var tabs = document.querySelectorAll('.tab');
+    tabs.forEach(function(t){
+      t.addEventListener('click', function(){
+        tabs.forEach(function(x){ x.classList.remove('active'); });
+        t.classList.add('active');
+        document.getElementById('pane-bars').classList.toggle('hidden', t.dataset.tab !== 'bars');
+        document.getElementById('pane-heat').classList.toggle('hidden', t.dataset.tab !== 'heat');
+      });
+    });
+  })();
+  </script>
+</body></html>]],
+        os.date("%b %-d"),
+        fnum(today.words), fnum(today.zh), fnum(today.en), ftime(today.seconds), fnum(today.count),
+        fnum(all.words), fnum(all.zh), fnum(all.en), ftime(all.seconds), fnum(all.count),
+        table.concat(barsHTML),
+        table.concat(months), table.concat(heatHTML),
+        fnum(all.avg),
+        fnum(all.best.words), stats.esc(bestLabel),
+        fnum(all.activeDays), stats.esc(sinceLabel),
+        emptyNote)
+end
+
+-- Open (or reopen) the stats dashboard window. Static snapshot at open time.
+function stats.show()
+    local ok = pcall(function()
+        if stats.webview then stats.webview:delete(); stats.webview = nil end
+        local screen = hs.screen.mainScreen():frame()
+        local w, h = 600, 620
+        local x = screen.x + (screen.w - w) / 2
+        local y = screen.y + (screen.h - h) / 2
+        stats.webview = hs.webview.new({ x = x, y = y, w = w, h = h })
+        stats.webview:windowStyle({ "titled", "closable", "resizable", "miniaturizable" })
+        stats.webview:level(hs.canvas.windowLevels.floating)
+        stats.webview:windowTitle("Dictation stats")
+        stats.webview:html(stats.html())
+        stats.webview:show()
+        stats.webview:bringToFront()
+    end)
+    if not ok then
+        -- Webview unavailable: fall back to a glance notification.
+        local t = stats.today()
+        hs.notify.new({ title = "Dictation stats",
+            informativeText = string.format("Today: %s 字词 · %s · %s dictations",
+                stats.fmtNum(t.words), stats.fmtTime(t.seconds), stats.fmtNum(t.count)) }):send()
+    end
+end
+
+stats.load()
+
 -- Auto-stop state
 local silentChunkCount = 0
 local silenceTimer = nil
@@ -1062,6 +1488,14 @@ local function buildMenuBarMenu()
 
     -- Current status
     table.insert(items, { title = isRecording and "● Recording..." or "Idle", disabled = true })
+
+    -- Today's glance (non-clickable) — e.g. "Today: 2,418 字词"
+    local todayStats = stats.today()
+    table.insert(items, {
+        title = "Today: " .. stats.fmtNum(todayStats.words) .. " 字词",
+        disabled = true,
+    })
+
     table.insert(items, { title = "-" })
 
     -- Language
@@ -1213,6 +1647,12 @@ local function buildMenuBarMenu()
                 setOverlayText("Click labels to change settings")
             end
         end,
+    })
+
+    -- Stats dashboard
+    table.insert(items, {
+        title = "Stats…",
+        fn = function() stats.show() end,
     })
 
     -- Recent dictations
@@ -1518,6 +1958,14 @@ local function finishInsertion(text, detectedLang)
     ctx.text = finalText
     runPostInsertActions(ctx)
 
+    -- Record stats only when text was actually inserted at the cursor.
+    -- Cancelled / empty / action-only dictations record nothing.
+    -- (The menu is rebuilt lazily on each open via setMenu(buildMenuBarMenu),
+    -- so the glance line picks up new totals without an explicit refresh.)
+    if ctx.inserted then
+        stats.record(finalText, stats.lastRecordingSeconds)
+    end
+
     -- Track in recent dictations
     table.insert(recentDictations, 1, {
         text = ctx.originalText,
@@ -1761,6 +2209,9 @@ local function stopRecording()
     if not isRecording then return end
     isRecording = false
     log("recording: stop")
+
+    -- Stash how long the key was held; stats.record() (in finishInsertion) uses it.
+    stats.lastRecordingSeconds = hs.timer.secondsSinceEpoch() - recordingStartTime
 
     if partialTimer then partialTimer:stop(); partialTimer = nil end
     if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
