@@ -94,10 +94,15 @@ Stored at `~/.local-whisper/stats.json` (JSON, local only, never uploaded):
   - `day = os.date("%Y-%m-%d")`;
   - load stats.json, add to `days[day]` (create if missing), set `since` if unset,
     write back.
-- Reuse the existing JSON load/save pattern from recent-dictations
-  (`hs.json.encode/decode`, atomic-ish overwrite). Keep an in-memory copy loaded
-  at startup, mutate in place (avoid the upvalue-reassignment pitfall noted in
+- Load/save with `hs.json.encode/decode`. Keep an in-memory copy loaded at
+  startup, mutate in place (avoid the upvalue-reassignment pitfall noted in
   AGENTS.md), and persist on each record.
+- **Atomic write (decision B):** write the encoded JSON to a temp file in the
+  same directory (e.g. `stats.json.tmp`), then `os.rename` it over
+  `stats.json`. `rename` within a filesystem is atomic, so a crash mid-write
+  can never leave a half-written `stats.json` — readers see either the old or
+  the new file, never a truncated one. (This is stronger than the existing
+  `recent.json` direct-overwrite; stats are worth the few extra lines.)
 
 ## UI
 
