@@ -74,11 +74,13 @@ echo -n "zh" > ~/.local-whisper/lang
 # Languages kept when in auto mode (Portuguese removed)
 echo -n "en,zh" > ~/.local-whisper/preferred_langs
 
-# Whisper initial prompt — biases output toward Simplified Chinese characters.
-# (Whisper is not an LLM; the bias comes from the characters present here, not
-#  the instruction. On silent/empty audio this text may occasionally leak into
-#  output — shorten it if that happens.)
-printf '以下是简体中文的对话记录，请将语音转写为规范的简体中文。' > ~/.local-whisper/prompt
+# Whisper initial prompt — biases output toward Simplified Chinese characters,
+# and seeds proper nouns (e.g. "Claude Code") so they transcribe correctly.
+# (Whisper is not an LLM; the bias comes from the words present here, not the
+#  instruction. Add high-frequency proper nouns after the colon, separated by 、.
+#  On silent/empty audio this text may occasionally leak into output — keep it
+#  short if that happens.)
+printf '以下是简体中文的对话记录，请将语音转写为规范的简体中文。可能出现的专有名词：Claude Code。' > ~/.local-whisper/prompt
 ```
 
 ## Setup facts (for reference)
