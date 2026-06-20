@@ -170,4 +170,5 @@ printf '以下是简体中文的对话记录，请将语音转写为规范的简
 
 ## Possible future changes
 
-Ideas not yet built are tracked in [FEATURES.md](FEATURES.md).
+Backlog of ideas not yet built lives in **bd** (the [beads](https://github.com/steveyegge/beads)
+issue tracker). Run `bd ready` for pickable work, `bd list --all` for everything.
