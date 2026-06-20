@@ -1,47 +1,41 @@
 # Feature list / backlog
 
-Ideas for this fork — things to maybe build later. **Add freely**: drop a new
-`- [ ]` item under *Ideas*, with a line or two on *why* and rough *effort*.
-Check it off (`- [x]`) or move it to *Shipped* when done. Details of what's
-already built live in [MODIFICATIONS.md](MODIFICATIONS.md).
+The active **backlog now lives in bd** (the [beads](https://github.com/steveyegge/beads)
+issue tracker), not in this file. Browse it from the repo root:
 
-Effort = rough size: **low** (a small contained edit) · **medium** (a function +
-some wiring) · **high** (architecture / lifecycle / a new dependency).
+```bash
+bd ready          # unblocked work, ready to pick up
+bd list           # open + in-progress issues
+bd list --all     # everything, including closed
+bd show <id>      # full detail (why + effort) for one issue
+```
 
-## Ideas
+Add an idea with:
 
-- [ ] **Persistent `whisper-server`** — kill the per-dictation model-reload delay
-  - Why: removes the ~1–2 s "floor" latency on every dictation (model stays warm
-    in memory instead of reloading each time).
-  - Effort: **high**. The `whisper-server` binary already exists in the build.
-    Needs process lifecycle (start on load, restart on model switch, stop on
-    shutdown) and a decision: one server (drop the tiny live-preview speedup) vs.
-    two servers (tiny + main warm, ~1.6 GB RAM).
+```bash
+bd create "Title" -t feature -p <0-4> --description="why + rough effort"
+```
 
-- [ ] **Configurable refine via remote / OpenAI-compatible API**
-  - Why: use a remote Ollama or a hosted LLM (OpenAI / Anthropic / Groq /
-    OpenRouter) for refine instead of only local Ollama.
-  - Effort: **medium**. Make endpoint + model + API key configurable.
-  - ⚠️ Privacy: this sends transcribed **text off-device**. Keep any API key in
-    `~/.local-whisper/`, never in the repo. Best-privacy option = self-hosted
-    remote Ollama (data stays on a box you control).
+Effort convention (write it into the description): **low** (a small contained
+edit) · **medium** (a function + some wiring) · **high** (architecture /
+lifecycle / a new dependency).
 
-- [ ] **OpenCC post-processing** — guaranteed Simplified Chinese
-  - Why: 100% Simplified output. The current `~/.local-whisper/prompt` is only a
-    soft bias, so Traditional characters still leak through.
-  - Effort: **low–medium**. `brew install opencc` + a `t2s` conversion step
-    before insertion, gated on language = zh.
+The *Shipped* list below stays as a human-readable changelog; implementation
+details live in [MODIFICATIONS.md](MODIFICATIONS.md).
 
-- [ ] **Configurable start/stop sounds**
-  - Why: only the "done" sound is configurable today; start (`Pop`) and stop
-    (`Tink`) are still hardcoded.
-  - Effort: **low**. Same pattern as the existing "Done sound" submenu.
+## Ideas migrated to bd (snapshot 2026-06-20)
 
-- [ ] **Bake zh / Simplified defaults into `init.lua`**
-  - Why: a fresh install would start in Chinese without the manual runtime-config
-    steps documented in MODIFICATIONS.md.
-  - Effort: **low**. Change the defaults in `getLang()` / `getPreferredLangs()`
-    and seed the prompt.
+> Frozen snapshot of what moved into bd. **Manage these in bd — don't edit here.**
+> Run `bd show <id>` for the full why/effort/notes.
+
+| bd id        | Idea                                                              | Effort  |
+|--------------|------------------------------------------------------------------|---------|
+| `lw-2bbb2dd4` | Persistent `whisper-server` — kill per-dictation reload latency  | high    |
+| `lw-30cffadd` | OpenCC post-processing — guaranteed Simplified Chinese           | low–med |
+| `lw-405345d5` | Configurable refine via remote / OpenAI-compatible API          | medium  |
+| `lw-339d7487` | Configurable start/stop sounds                                   | low     |
+| `lw-d827d2aa` | Bake zh / Simplified defaults into `init.lua`                    | low     |
+| `lw-6c74bfbd` | Easy custom-vocab dictionary + fuzzy snap-to-term correction    | —       |
 
 ## Shipped
 
