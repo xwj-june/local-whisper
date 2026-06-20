@@ -388,12 +388,6 @@ local function getTheme()
     return "light"
 end
 
-local function cycleTheme()
-    local cycle = { light = "paper", paper = "dark", dark = "light" }
-    local next = cycle[getTheme()] or "light"
-    writeFile(THEME_FILE, next)
-    return next
-end
 
 -- Live preview: rough tiny-model transcription shown in the overlay while
 -- recording. OFF by default — it's only a liveness indicator (laggy + uses the
@@ -1569,25 +1563,34 @@ local function buildMenuBarMenu()
 
     table.insert(items, { title = "-" })
 
-    -- Theme (cycles Frosted Light → Warm Paper → Soft Dark)
+    -- Theme (submenu: pick a theme directly; current one is checkmarked)
     local themeNames = { light = "Frosted Light", paper = "Warm Paper", dark = "Soft Dark" }
+    local function applyTheme(key)
+        writeFile(THEME_FILE, key)
+        updateMenuBar()
+        -- If the overlay is on screen, recreate it so the new theme shows live
+        if overlay then
+            local wasPinned = overlayPinned
+            forceHideOverlay()
+            showOverlay()
+            if wasPinned then
+                overlayPinned = true
+                overlay[1].fillColor = THEMES[getTheme()].panelPinBg
+                setOverlayText("Theme: " .. (themeNames[getTheme()] or getTheme()))
+            end
+        end
+    end
+    local themeItems = {}
+    for _, key in ipairs({ "light", "paper", "dark" }) do
+        table.insert(themeItems, {
+            title = themeNames[key],
+            checked = (getTheme() == key),
+            fn = function() applyTheme(key) end,
+        })
+    end
     table.insert(items, {
         title = "Theme: " .. (themeNames[getTheme()] or getTheme()),
-        fn = function()
-            cycleTheme()
-            updateMenuBar()
-            -- If the overlay is on screen, recreate it so the new theme shows live
-            if overlay then
-                local wasPinned = overlayPinned
-                forceHideOverlay()
-                showOverlay()
-                if wasPinned then
-                    overlayPinned = true
-                    overlay[1].fillColor = THEMES[getTheme()].panelPinBg
-                    setOverlayText("Theme: " .. (themeNames[getTheme()] or getTheme()))
-                end
-            end
-        end,
+        menu = themeItems,
     })
 
     -- Completion sound (submenu: pick a system sound or Off; picking previews it)
