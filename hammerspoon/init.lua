@@ -222,6 +222,31 @@ local function getEnterMode()
     return mode == "on"
 end
 
+-- Microphone pin: dictation can be pinned to a named input device independent
+-- of the system default (e.g. keep the built-in mic while AirPods are
+-- connected — Bluetooth HFP warm-up swallows the first 1-2s of speech).
+-- ~/.local-whisper/mic holds a device name, or "auto"/missing to follow the
+-- system default. One table, not separate locals: the main chunk is near
+-- Lua's 200-local limit.
+local mic = {}
+mic.FILE = CONFIG_DIR .. "/mic"
+function mic.get()
+    local name = readFile(mic.FILE):match("^%s*(.-)%s*$")
+    if name == "" or name == "auto" then return "auto" end
+    return name
+end
+function mic.set(name) writeFile(mic.FILE, name) end
+-- The ffmpeg avfoundation "-i" value for the current setting. Pinned devices
+-- are matched by NAME (indices renumber as Bluetooth devices come and go).
+-- Falls back to the system default if the pinned device is offline.
+function mic.deviceArg()
+    local name = mic.get()
+    if name == "auto" then return AUDIO_DEVICE end
+    if hs.audiodevice.findInputByName(name) then return ":" .. name end
+    log("mic: pinned device '" .. name .. "' offline — falling back to system default")
+    return AUDIO_DEVICE
+end
+
 local function shellQuote(text)
     return "'" .. tostring(text):gsub("'", "'\\''") .. "'"
 end
@@ -1593,6 +1618,37 @@ local function buildMenuBarMenu()
         menu = themeItems,
     })
 
+    -- Microphone (submenu: pin dictation to an input device; Auto = system default)
+    local currentMic = mic.get()
+    local micItems = {
+        {
+            title = "Auto (system default)",
+            checked = (currentMic == "auto"),
+            fn = function() mic.set("auto"); updateMenuBar() end,
+        },
+    }
+    for _, dev in ipairs(hs.audiodevice.allInputDevices() or {}) do
+        local name = dev:name()
+        table.insert(micItems, {
+            title = name,
+            checked = (currentMic == name),
+            fn = function() mic.set(name); updateMenuBar() end,
+        })
+    end
+    -- A pinned device that's currently offline isn't in the list — show it
+    -- anyway so the pin stays visible (recording falls back to system default).
+    if currentMic ~= "auto" and not hs.audiodevice.findInputByName(currentMic) then
+        table.insert(micItems, {
+            title = currentMic .. " (offline — using system default)",
+            checked = true,
+            disabled = true,
+        })
+    end
+    table.insert(items, {
+        title = "Microphone: " .. (currentMic == "auto" and "Auto" or currentMic),
+        menu = micItems,
+    })
+
     -- Completion sound (submenu: pick a system sound or Off; picking previews it)
     local currentSound = getSound()
     local soundItems = {}
@@ -2184,13 +2240,14 @@ local function startRecording()
     updateMenuBar()
     hs.sound.getByFile("/System/Library/Sounds/Pop.aiff"):play()
 
+    local micArg = mic.deviceArg()
     ffmpegTask = hs.task.new(FFMPEG, function(code, out, err)
         log("recording: ffmpeg exited " .. tostring(code))
         if code == 251 or code == 1 then
-            log("recording: ERROR — ffmpeg failed to open audio device '" .. AUDIO_DEVICE .. "'. Check device format (should be :default, :0, :1) and microphone permissions.")
+            log("recording: ERROR — ffmpeg failed to open audio device '" .. micArg .. "'. Check device format (should be :default, :0, :1) and microphone permissions.")
         end
     end, {
-        "-f", "avfoundation", "-i", AUDIO_DEVICE,
+        "-f", "avfoundation", "-i", micArg,
         "-ac", "1", "-ar", "16000",
         "-f", "segment", "-segment_time", "1", "-segment_format", "wav",
         CHUNK_DIR .. "/chunk_%03d.wav"
