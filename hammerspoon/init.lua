@@ -47,7 +47,7 @@ local function getModelName()
         local attr = hs.fs.attributes(path)
         if attr then return saved end
     end
-    return "medium"  -- default
+    return "large-v3-turbo-q5_0"  -- default (what install.sh downloads)
 end
 
 local function getModelPath()

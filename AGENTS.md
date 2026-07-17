@@ -24,7 +24,7 @@ Everything runs inside `~/.hammerspoon/init.lua` — no external bash scripts at
 - `~/.hammerspoon/local_whisper_actions.lua` — user voice commands (optional, auto-reloads)
 - `~/.local-whisper/` — all user settings (lang, model, output, prompt, recent dictations)
 - `~/whisper.cpp/build/bin/whisper-cli` — transcription binary
-- `~/whisper.cpp/models/` — whisper models (medium, tiny, etc.)
+- `~/whisper.cpp/models/` — whisper models (large-v3-turbo-q5_0, tiny, etc.) plus CoreML encoder `.mlmodelc` dirs
 - `$TMPDIR/whisper-dictate/` — all temp state (per-user private dir on macOS)
 - `$TMPDIR/whisper-dictate/chunks/` — recording segments (ephemeral)
 - `$TMPDIR/whisper-dictate/whisper-dictate.log` — debug log

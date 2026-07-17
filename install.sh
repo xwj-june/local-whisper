@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ─── Configurable paths ─────────────────────────────────────────────────────
 WHISPER_CPP_DIR="$HOME/whisper.cpp"
-WHISPER_MODEL="medium"
+WHISPER_MODEL="large-v3-turbo-q5_0"
 HAMMERSPOON_DIR="$HOME/.hammerspoon"
 
 # ─── Preflight ───────────────────────────────────────────────────────────────
@@ -79,9 +79,20 @@ fi
 echo ""
 info "Step 2/6: Building whisper.cpp..."
 
+# On Apple Silicon, build with CoreML so the encoder runs on the Neural
+# Engine (roughly halves dictation latency). An existing build without
+# CoreML is rebuilt.
+NEED_BUILD=1
 if [[ -x "$WHISPER_CPP_DIR/build/bin/whisper-cli" ]]; then
-    ok "whisper-cli already built at $WHISPER_CPP_DIR/build/bin/whisper-cli"
-else
+    if [[ "$ARCH" != "arm64" ]] || grep -qE 'WHISPER_COREML:BOOL=(1|ON|TRUE)' "$WHISPER_CPP_DIR/build/CMakeCache.txt" 2>/dev/null; then
+        ok "whisper-cli already built at $WHISPER_CPP_DIR/build/bin/whisper-cli"
+        NEED_BUILD=0
+    else
+        warn "Existing whisper-cli was built without CoreML — rebuilding"
+    fi
+fi
+
+if [[ "$NEED_BUILD" == "1" ]]; then
     if [[ ! -d "$WHISPER_CPP_DIR" ]]; then
         info "Cloning whisper.cpp..."
         git clone https://github.com/ggml-org/whisper.cpp "$WHISPER_CPP_DIR"
@@ -91,7 +102,11 @@ else
 
     info "Building with cmake (this may take a few minutes)..."
     cd "$WHISPER_CPP_DIR"
-    cmake -B build
+    if [[ "$ARCH" == "arm64" ]]; then
+        cmake -B build -DWHISPER_COREML=1
+    else
+        cmake -B build
+    fi
     cmake --build build -j --config Release
     cd "$SCRIPT_DIR"
 
@@ -111,7 +126,7 @@ MODEL_FILE="$WHISPER_CPP_DIR/models/ggml-${WHISPER_MODEL}.bin"
 if [[ -f "$MODEL_FILE" ]]; then
     ok "Model already downloaded: ggml-${WHISPER_MODEL}.bin"
 else
-    info "Downloading ggml-${WHISPER_MODEL}.bin (~1.5 GB)..."
+    info "Downloading ggml-${WHISPER_MODEL}.bin (~550 MB)..."
     cd "$WHISPER_CPP_DIR"
     bash ./models/download-ggml-model.sh "$WHISPER_MODEL"
     cd "$SCRIPT_DIR"
@@ -139,6 +154,35 @@ else
     else
         warn "Tiny model download failed — live preview will use main model (slower but works)"
     fi
+fi
+
+# On Apple Silicon, also download prebuilt CoreML encoders so the whisper
+# encoder runs on the Neural Engine. whisper-cli picks them up automatically
+# when a ggml-<model>-encoder.mlmodelc dir sits next to the .bin (quantization
+# suffixes like -q5_0 are ignored when matching). Optional: without them,
+# transcription falls back to Metal — slower but fully functional.
+if [[ "$ARCH" == "arm64" ]]; then
+    COREML_SRC="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+    for ENC in large-v3-turbo tiny; do
+        ENC_DIR="$WHISPER_CPP_DIR/models/ggml-${ENC}-encoder.mlmodelc"
+        if [[ -d "$ENC_DIR" ]]; then
+            ok "CoreML encoder already present: ggml-${ENC}-encoder.mlmodelc"
+            continue
+        fi
+        ENC_ZIP="$WHISPER_CPP_DIR/models/ggml-${ENC}-encoder.mlmodelc.zip"
+        info "Downloading CoreML encoder for ${ENC}..."
+        if curl -fL --progress-bar -o "$ENC_ZIP" "$COREML_SRC/ggml-${ENC}-encoder.mlmodelc.zip" \
+            && unzip -q -o "$ENC_ZIP" -d "$WHISPER_CPP_DIR/models"; then
+            ok "CoreML encoder installed: ggml-${ENC}-encoder.mlmodelc"
+        else
+            warn "CoreML encoder download failed for ${ENC} — encoder will run on Metal (slower but works)"
+        fi
+        rm -f "$ENC_ZIP"
+        rm -rf "$WHISPER_CPP_DIR/models/__MACOSX"
+    done
+    echo ""
+    info "Note: the first dictation after install is slow (macOS compiles the"
+    info "CoreML model for the Neural Engine once); subsequent ones are fast."
 fi
 
 # ─── Step 4: Install Hammerspoon config ─────────────────────────────────────

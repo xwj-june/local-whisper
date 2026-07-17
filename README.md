@@ -70,21 +70,29 @@ To change the trigger key or re-run setup later:
 brew install ffmpeg cmake git
 brew install --cask hammerspoon
 
-# 2. Build whisper.cpp
+# 2. Build whisper.cpp (drop -DWHISPER_COREML=1 on Intel Macs)
 cd ~
 git clone https://github.com/ggml-org/whisper.cpp
 cd whisper.cpp
-cmake -B build
+cmake -B build -DWHISPER_COREML=1
 cmake --build build -j --config Release
 
-# 3. Download model (~1.5 GB; or see "Faster final transcription" below
-#    for the smaller, faster, more accurate large-v3-turbo-q5_0)
-./models/download-ggml-model.sh medium
+# 3. Download model (~550 MB)
+./models/download-ggml-model.sh large-v3-turbo-q5_0
 
 # 4. Optional: download tiny model for faster live preview
 ./models/download-ggml-model.sh tiny
 
-# 5. Copy Hammerspoon config
+# 5. Apple Silicon only: prebuilt CoreML encoders (runs the encoder on the
+#    Neural Engine; without these whisper falls back to Metal — still works)
+cd models
+curl -fLO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-encoder.mlmodelc.zip
+curl -fLO https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-encoder.mlmodelc.zip
+unzip -o ggml-large-v3-turbo-encoder.mlmodelc.zip && unzip -o ggml-tiny-encoder.mlmodelc.zip
+rm -f *.mlmodelc.zip && rm -rf __MACOSX
+cd ..
+
+# 6. Copy Hammerspoon config
 cp hammerspoon/init.lua ~/.hammerspoon/init.lua
 ```
 
@@ -161,7 +169,7 @@ file in `~/.local-whisper/`.
 | Setting | What it does | Where to change it | Values | Default |
 |---|---|---|---|---|
 | **Language** | Transcription language | Menu bar / overlay `lang` chip | `EN`, `ZH`, `auto` | `EN` (`auto` recommended for bilingual use) |
-| **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `medium` (`large-v3-turbo-q5_0` recommended) |
+| **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `large-v3-turbo-q5_0` |
 | **Microphone** | Input device for dictation | Menu bar → *Microphone* | Auto, or any input device by name | Auto (system default) |
 | **Output** | How text is inserted | Menu bar / overlay `output` chip | `paste`, `type` | `paste` |
 | **Enter after insert** | Press Return after inserting | Menu bar / overlay `⏎` chip | on / off | off |
@@ -214,7 +222,7 @@ overlay tells you while it works:
   *liveness indicator*, **not** the text you'll get — it uses the fastest,
   least-accurate model (`tiny`), refreshes every couple of seconds, and is
   **thrown away**: the text you actually receive is re-transcribed from scratch
-  with your chosen model (`medium`) when you release the key.
+  with your chosen model (e.g. `large-v3-turbo-q5_0`) when you release the key.
 
 It's off by default because on a fast machine the final result lands in a few
 seconds anyway, and a laggy, wrong preview tends to distract more than it helps.
