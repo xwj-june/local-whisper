@@ -296,6 +296,17 @@ pin as *offline*.
   100%-Simplified OpenCC option.
 - `large-v3-turbo-q5_0` is noticeably better at Chinese than `medium` — see
   the next section.
+- **Cantonese**: whisper has `yue` as a first-class language (large-v3
+  family onward), but in practice Cantonese comes out as standard written
+  Chinese whichever way it goes (verified 2026-07-17): casual Cantonese is
+  usually *detected* as `zh` and normalized during decoding; even a forced
+  `-l yue` pass produces standard Chinese rather than 粤文 (whisper's
+  Cantonese training data is dominated by standard-Chinese subtitles, and a
+  Mandarin prompt sentence pulls the style further). If `yue` *is* detected
+  while not in `preferred_langs`, the guardrail re-transcribes it as
+  forced-EN garbage. Getting true 粤文 out would need `yue` added to
+  `preferred_langs` *plus* a written-Cantonese prompt example (e.g.
+  "以下係廣東話嘅句子。") — untested.
 
 ### How language handling works
 
@@ -315,9 +326,16 @@ A dictation flows through these steps:
    vocabulary spelling **and style** — punctuated Chinese + English example
    sentences give punctuated output in both languages; a bare word list
    gives unpunctuated Chinese.
-4. Mixed-language dictations stay a single transcript: detection picks the
-   dominant language, and code-switched words come through in their own
-   script (e.g. a 中文 clause followed by an English sentence).
+4. Mixed-language dictations need no special branch, because the detected
+   label is a *bias*, not a filter: whisper's vocabulary is shared across
+   all languages, so code-switched words always come through in their own
+   script. A zh-labelled dictation keeps embedded English ("Fast forward到
+   最新的main"), and an en-labelled one keeps a leading 中文 clause intact.
+   The label mainly decides punctuation/style conventions and which
+   language's homophones win. Since the dominant language of a mixed
+   en/zh dictation is still en or zh, the preferred-language retry
+   effectively never fires for mixed speech — it exists for genuine
+   misdetections (noise heard as Japanese, etc.).
 
 ## Custom vocabulary prompt
 
@@ -510,6 +528,7 @@ local AUTO_STOP_THRESHOLD_DB = -40
 - **First words of a dictation missing**: Your system input is probably a Bluetooth mic — its 1–2s headset-mode warm-up records as silence (log shows leading chunks at −91dB). Pin the built-in mic: menu bar → **Microphone**.
 - **Output comes back in the wrong language / translated**: `~/.local-whisper/prompt` almost certainly contains an instruction sentence. The prompt must contain only vocabulary and neutral example sentences — see [Custom vocabulary prompt](#custom-vocabulary-prompt).
 - **Chinese output has no punctuation**: the prompt lacks a punctuated example sentence — see [Chinese / bilingual dictation](#chinese--bilingual-dictation).
+- **A dictation comes back as the prompt text itself** (e.g. "the following are English sentences."): on very short or unclear audio, whisper treats the prompt as prior transcript and echoes it as the "continuation". This is the known cost of example sentences in the prompt — harmless if occasional; if it happens often, shorten the example sentences or check the mic.
 - **Overlay not appearing**: Hammerspoon may need Accessibility permission re-granted after updates
 
 ## Disclaimer
