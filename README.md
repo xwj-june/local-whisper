@@ -11,6 +11,8 @@ Hold **Right Cmd**, speak, release — text appears at your cursor.
 - **Live preview** (off by default): Optional rough partial transcription in the overlay while you speak — a liveness indicator, toggle on from the menu bar
 - **Recording indicator**: Audio level meter (bars that move with your voice, flat if the mic is dead) and elapsed timer in the overlay
 - **Multi-language**: English, Chinese (Simplified), and auto-detect with preferred-language fallback
+- **Fast on Apple Silicon**: with the turbo model + Core ML encoder on the Neural Engine, a short dictation lands in ~1.5–2s after key release (see [Faster final transcription](#faster-final-transcription-turbo-model--core-ml))
+- **Microphone pinning**: pin dictation to a specific input device — e.g. keep the built-in mic while wearing AirPods (Bluetooth mics swallow the first words)
 - **App-aware processing**: Auto-capitalizes in most apps, skips in terminals and code editors
 - **LLM refinement** (optional): Clean up dictated text with a local LLM via [Ollama](https://ollama.com) — fixes punctuation, removes filler words, formats numbered lists
 - **Text post-processing**: Remove filler words (um, uh, hmm), clean whitespace
@@ -75,7 +77,8 @@ cd whisper.cpp
 cmake -B build
 cmake --build build -j --config Release
 
-# 3. Download model (~1.5 GB)
+# 3. Download model (~1.5 GB; or see "Faster final transcription" below
+#    for the smaller, faster, more accurate large-v3-turbo-q5_0)
 ./models/download-ggml-model.sh medium
 
 # 4. Optional: download tiny model for faster live preview
@@ -116,13 +119,18 @@ This installs the `hs` command-line tool used for IPC.
 
 ### Audio device
 
-The default `:default` uses your system input device — this is recommended as it survives dock/undock and audio device changes. To use a specific device, find its index:
+To pin dictation to a specific input device, use the menu bar → **Microphone**
+picker — no file editing needed (see [Microphone](#microphone) in the settings
+guide). It matches devices by name and falls back to the system default when
+the pinned device is offline.
+
+`AUDIO_DEVICE` in `~/.hammerspoon/init.lua` (default `:default` = system input
+device) remains as the low-level base setting the picker falls back to; you
+shouldn't normally need to touch it. To inspect what ffmpeg sees:
 
 ```bash
 ffmpeg -f avfoundation -list_devices true -i ""
 ```
-
-Then update `AUDIO_DEVICE` in `~/.hammerspoon/init.lua` (e.g., `:0`, `:1`).
 
 ## Menu bar
 
@@ -131,6 +139,7 @@ A waveform icon in the menu bar shows recording status (turns red when recording
 - See current language, model, output mode, enter mode, and LLM refine status
 - Click any setting to cycle it
 - Toggle the **live preview** while recording (off by default)
+- Pin the **microphone** to a specific input device, or Auto to follow the system default
 - Switch the overlay **theme** (Frosted Light / Warm Paper / Soft Dark)
 - Change the **loading icon** shown while transcribing (4 styles)
 - Change the **completion sound** (or turn it off)
@@ -151,8 +160,9 @@ file in `~/.local-whisper/`.
 
 | Setting | What it does | Where to change it | Values | Default |
 |---|---|---|---|---|
-| **Language** | Transcription language | Menu bar / overlay `lang` chip | `EN`, `ZH`, `auto` | `ZH` |
-| **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `medium` |
+| **Language** | Transcription language | Menu bar / overlay `lang` chip | `EN`, `ZH`, `auto` | `EN` (`auto` recommended for bilingual use) |
+| **Model** | Whisper model for the final transcription | Menu bar / overlay `model` chip | any model in `~/whisper.cpp/models/` | `medium` (`large-v3-turbo-q5_0` recommended) |
+| **Microphone** | Input device for dictation | Menu bar → *Microphone* | Auto, or any input device by name | Auto (system default) |
 | **Output** | How text is inserted | Menu bar / overlay `output` chip | `paste`, `type` | `paste` |
 | **Enter after insert** | Press Return after inserting | Menu bar / overlay `⏎` chip | on / off | off |
 | **Live preview** | Rough partial text in the overlay while recording | Menu bar → *Live preview* | on / off | off |
@@ -237,18 +247,42 @@ system sounds plus **Off**; picking one previews it and saves the choice. Stored
 in `~/.local-whisper/sound` (a sound name, or `off`). The start/stop cues remain
 `Pop` / `Tink`.
 
-### Simplified Chinese
+### Microphone
 
-This setup is tuned for Simplified Chinese:
+Menu bar → **Microphone** lists the available input devices; pick one to pin
+dictation to it, or **Auto (system default)** to follow the system input.
+Stored in `~/.local-whisper/mic` (a device name, or `auto`).
 
-- Set **Language** to `ZH` for the most reliable result — `auto` works but is slower.
-- Whisper mixes Traditional and Simplified output. `~/.local-whisper/prompt` is
-  seeded with a Simplified-Chinese sentence to bias the output toward Simplified.
-  Occasional Traditional characters are a model limitation; see
-  [MODIFICATIONS.md](MODIFICATIONS.md) for a 100%-Simplified OpenCC option.
-- For better Chinese accuracy at the cost of speed, download a larger model:
-  `bash ~/whisper.cpp/models/download-ggml-model.sh large-v3`, then pick it from
-  the menu bar.
+Why pin: Bluetooth headsets (AirPods etc.) take 1–2 seconds to switch their
+mic into headset mode when recording starts — the recording gets pure digital
+silence in that window and **the first words of your dictation are lost**.
+Pinning the built-in microphone fixes this while leaving the headset connected
+for audio playback (which also sounds better — Bluetooth output quality drops
+while its mic is active).
+
+Devices are matched by *name*, not index — indices renumber as Bluetooth
+devices come and go. If the pinned device is offline when you dictate, the
+recording falls back to the system default (and logs it); the menu shows the
+pin as *offline*.
+
+### Chinese / bilingual dictation
+
+- For mixed English + Chinese use, set **Language** to `auto` with
+  `preferred_langs` = `en,zh`. Whisper detects the spoken language per
+  dictation; anything outside the preferred list is re-transcribed with the
+  first preferred language as a fallback.
+- Set **Language** to `ZH` only if you dictate exclusively in Chinese — a
+  forced language skips the detection pass, so it's a bit faster.
+- **Do not put instructions in `~/.local-whisper/prompt`** (e.g. "请转写为简体中文").
+  The prompt is fake *prior context*, not an instruction — whisper continues in
+  the prompt's language, which makes it silently **translate** English speech
+  into Chinese, in both `auto` and forced-`EN` modes. Keep the prompt to a bare
+  vocabulary list (see [Custom vocabulary prompt](#custom-vocabulary-prompt)).
+- Whisper occasionally mixes Traditional characters into Simplified output —
+  a model limitation; see [MODIFICATIONS.md](MODIFICATIONS.md) for a
+  100%-Simplified OpenCC option.
+- `large-v3-turbo-q5_0` is noticeably better at Chinese than `medium` — see
+  the next section.
 
 ## Custom vocabulary prompt
 
@@ -259,6 +293,12 @@ Claude, Hammerspoon, whisper.cpp, ffmpeg, macOS, Lua, Anthropic
 ```
 
 This is passed as `--prompt` to whisper-cli for both partial and final transcription. Adding your voice command trigger words here improves recognition.
+
+> **Warning — vocabulary only, never instructions.** The prompt is injected as
+> fake *prior transcript context*, so whisper imitates its language and style
+> rather than obeying it. An instruction sentence written in Chinese (or any
+> language) biases whisper to output that language — up to silently
+> *translating* your speech — even when the language is forced to `EN`.
 
 ## LLM refinement (optional)
 
@@ -289,6 +329,66 @@ cd ~/whisper.cpp/models
 ```
 
 The system automatically picks the smallest available model (tiny > base > small) for partials while keeping your chosen model for the final transcription.
+
+## Faster final transcription (turbo model + Core ML)
+
+Two independent upgrades cut end-to-end latency roughly in half each. Measured
+on an M4 (same ~3s clip, `auto` mode, warm):
+
+| Setup | Total after key release |
+|---|---|
+| `medium`, stock build | ~4.0s |
+| `large-v3-turbo-q5_0` | ~2.7s |
+| + Core ML encoder on the Neural Engine | **~1.5–2.0s** |
+
+### 1. Switch to `large-v3-turbo-q5_0`
+
+OpenAI's turbo model: a large-v3-quality encoder with the decoder pruned from
+32 layers to 4, quantized to 5-bit — 547MB instead of medium's 1.4GB, so it
+loads ~10× faster, and it's *more* accurate than `medium` (notably for
+Chinese). No code change:
+
+```bash
+bash ~/whisper.cpp/models/download-ggml-model.sh large-v3-turbo-q5_0
+```
+
+Then pick it from the menu bar → **Model**.
+
+### 2. Run the encoder on the Apple Neural Engine (Core ML)
+
+The encoder is the expensive half of whisper (in `auto` mode it runs twice —
+once for language detection, once for transcription). Core ML moves it from
+the GPU to the dedicated Neural Engine, ~2.5× faster per pass.
+
+Rebuild whisper.cpp with Core ML enabled (`ALLOW_FALLBACK` keeps models
+without a Core ML encoder working on the GPU as before):
+
+```bash
+cd ~/whisper.cpp
+cmake -B build -DWHISPER_COREML=1 -DWHISPER_COREML_ALLOW_FALLBACK=1
+cmake --build build -j --target whisper-cli
+```
+
+Download the matching pre-converted Core ML encoder (official whisper.cpp
+Hugging Face repo — no Python needed) and unzip it next to the `.bin`:
+
+```bash
+cd ~/whisper.cpp/models
+curl -L -O "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-encoder.mlmodelc.zip"
+unzip ggml-large-v3-turbo-encoder.mlmodelc.zip && rm ggml-large-v3-turbo-encoder.mlmodelc.zip
+```
+
+Notes:
+
+- whisper-cli picks the Core ML encoder up automatically — it looks for
+  `ggml-<model>-encoder.mlmodelc` beside the model file (quantization suffixes
+  like `-q5_0` are ignored when matching, so one fp16 encoder serves all
+  quantizations of a model).
+- **The first run takes minutes** — macOS compiles the model for the Neural
+  Engine once, then caches it. Every run after that is fast.
+- The `.mlmodelc` is ~1.2GB on disk (fp16, unquantized). It affects disk only;
+  at runtime it's the reason the encoder is fast.
+- Grab `ggml-tiny-encoder.mlmodelc.zip` (15MB) too if you use live preview.
 
 ## App-aware text processing
 
@@ -342,7 +442,8 @@ The config auto-reloads when you save the file. For more patterns and examples, 
 Modifier key hold/release (detected by Hammerspoon eventtap)
   → ffmpeg records chunked WAV segments (1s each)
   → Partial transcription loop: concat latest chunks → whisper-cli (tiny model)
-  → On release: concat all chunks → final whisper-cli transcription (chosen model)
+  → On release: concat all chunks → final whisper-cli transcription (chosen model;
+    encoder runs on the Apple Neural Engine if built with Core ML)
   → Post-processing: remove fillers, capitalize, app-aware adjustments
   → Optional LLM refinement via Ollama (punctuation, formatting, cleanup)
   → Voice command hooks: beforeInsert → actions → text insertion → afterInsert
@@ -367,6 +468,8 @@ local AUTO_STOP_THRESHOLD_DB = -40
 - **External keyboard mapping**: Some keyboards (e.g., Logitech MX Keys) send non-standard modifier flags. Try different `TRIGGER_KEY` values (`rightAlt`, `rightCmd`, `rightCtrl`) in init.lua
 - **`hs` command not found**: Run `hs.ipc.cliInstall()` in Hammerspoon console
 - **Voice commands not triggering**: Check the log to see what whisper transcribed — add command words to `~/.local-whisper/prompt`
+- **First words of a dictation missing**: Your system input is probably a Bluetooth mic — its 1–2s headset-mode warm-up records as silence (log shows leading chunks at −91dB). Pin the built-in mic: menu bar → **Microphone**.
+- **Output comes back in the wrong language / translated**: `~/.local-whisper/prompt` almost certainly contains an instruction sentence. The prompt must be a bare vocabulary list — see [Custom vocabulary prompt](#custom-vocabulary-prompt).
 - **Overlay not appearing**: Hammerspoon may need Accessibility permission re-granted after updates
 
 ## Disclaimer
