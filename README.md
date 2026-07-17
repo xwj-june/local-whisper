@@ -273,32 +273,71 @@ pin as *offline*.
   first preferred language as a fallback.
 - Set **Language** to `ZH` only if you dictate exclusively in Chinese — a
   forced language skips the detection pass, so it's a bit faster.
+- **Chinese output has no punctuation?** Whisper's Chinese training data is
+  largely unpunctuated subtitles, so with a bare vocabulary prompt (or none)
+  Chinese comes out as one long unpunctuated run. Whisper imitates the *style*
+  of the prompt — so show it punctuation with one example sentence per
+  language:
+
+  ```
+  以下是普通话的句子。The following are English sentences. Claude Code.
+  ```
+
+  Punctuated *example* sentences are safe (verified: English speech is still
+  detected as `en` with this prompt); *instruction* sentences are not — see
+  the warning in [Custom vocabulary prompt](#custom-vocabulary-prompt).
 - **Do not put instructions in `~/.local-whisper/prompt`** (e.g. "请转写为简体中文").
-  The prompt is fake *prior context*, not an instruction — whisper continues in
-  the prompt's language, which makes it silently **translate** English speech
-  into Chinese, in both `auto` and forced-`EN` modes. Keep the prompt to a bare
-  vocabulary list (see [Custom vocabulary prompt](#custom-vocabulary-prompt)).
+  The prompt is fake *prior context*, not an instruction — whisper obeys
+  nothing and imitates everything. An instruction sentence makes it silently
+  **translate** English speech into Chinese, in both `auto` and forced-`EN`
+  modes.
 - Whisper occasionally mixes Traditional characters into Simplified output —
   a model limitation; see [MODIFICATIONS.md](MODIFICATIONS.md) for a
   100%-Simplified OpenCC option.
 - `large-v3-turbo-q5_0` is noticeably better at Chinese than `medium` — see
   the next section.
 
+### How language handling works
+
+A dictation flows through these steps:
+
+1. Recorded chunks are concatenated into one WAV.
+2. **Language selection:**
+   - `auto` mode: whisper-cli runs with `-l auto` and detects the language
+     from the audio itself — the prompt has no influence on detection (it
+     only enters play during decoding). If the detected language is in
+     `preferred_langs`, that transcript is used as-is; otherwise the audio
+     is re-transcribed with the first preferred language forced.
+   - Forced mode (e.g. `ZH`): a single pass with that language, no
+     detection.
+3. The same `~/.local-whisper/prompt` is passed to every pass, partial and
+   final. Whisper treats it as fake prior transcript and imitates its
+   vocabulary spelling **and style** — punctuated Chinese + English example
+   sentences give punctuated output in both languages; a bare word list
+   gives unpunctuated Chinese.
+4. Mixed-language dictations stay a single transcript: detection picks the
+   dominant language, and code-switched words come through in their own
+   script (e.g. a 中文 clause followed by an English sentence).
+
 ## Custom vocabulary prompt
 
-Create `~/.local-whisper/prompt` with terms whisper should recognize better:
+Create `~/.local-whisper/prompt` with terms whisper should recognize better.
+If you dictate in Chinese, lead with a punctuated example sentence per
+language so whisper punctuates the output (see
+[Chinese / bilingual dictation](#chinese--bilingual-dictation)):
 
 ```
-Claude, Hammerspoon, whisper.cpp, ffmpeg, macOS, Lua, Anthropic
+以下是普通话的句子。The following are English sentences. Claude, Hammerspoon, whisper.cpp, ffmpeg, macOS, Lua, Anthropic.
 ```
 
 This is passed as `--prompt` to whisper-cli for both partial and final transcription. Adding your voice command trigger words here improves recognition.
 
-> **Warning — vocabulary only, never instructions.** The prompt is injected as
-> fake *prior transcript context*, so whisper imitates its language and style
-> rather than obeying it. An instruction sentence written in Chinese (or any
-> language) biases whisper to output that language — up to silently
-> *translating* your speech — even when the language is forced to `EN`.
+> **Warning — examples and vocabulary only, never instructions.** The prompt
+> is injected as fake *prior transcript context*, so whisper imitates its
+> style rather than obeying it. Neutral example sentences are fine, but an
+> *instruction* sentence (e.g. "请转写为简体中文") biases whisper to output
+> that language — up to silently *translating* your speech — even when the
+> language is forced to `EN`.
 
 ## LLM refinement (optional)
 
@@ -469,7 +508,8 @@ local AUTO_STOP_THRESHOLD_DB = -40
 - **`hs` command not found**: Run `hs.ipc.cliInstall()` in Hammerspoon console
 - **Voice commands not triggering**: Check the log to see what whisper transcribed — add command words to `~/.local-whisper/prompt`
 - **First words of a dictation missing**: Your system input is probably a Bluetooth mic — its 1–2s headset-mode warm-up records as silence (log shows leading chunks at −91dB). Pin the built-in mic: menu bar → **Microphone**.
-- **Output comes back in the wrong language / translated**: `~/.local-whisper/prompt` almost certainly contains an instruction sentence. The prompt must be a bare vocabulary list — see [Custom vocabulary prompt](#custom-vocabulary-prompt).
+- **Output comes back in the wrong language / translated**: `~/.local-whisper/prompt` almost certainly contains an instruction sentence. The prompt must contain only vocabulary and neutral example sentences — see [Custom vocabulary prompt](#custom-vocabulary-prompt).
+- **Chinese output has no punctuation**: the prompt lacks a punctuated example sentence — see [Chinese / bilingual dictation](#chinese--bilingual-dictation).
 - **Overlay not appearing**: Hammerspoon may need Accessibility permission re-granted after updates
 
 ## Disclaimer
