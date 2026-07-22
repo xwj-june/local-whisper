@@ -66,6 +66,12 @@ end
 -- Trigger key: "rightAlt", "rightCmd", "rightCtrl"
 local TRIGGER_KEY = "rightCmd"
 
+-- Hold vs. toggle: the same trigger key does both, told apart by how long it's
+-- held before release. Release sooner than this (a quick tap) latches recording
+-- ON until the next tap (toggle mode); hold longer and release stops it as usual
+-- (push-to-talk). Seconds.
+local TOGGLE_TAP_THRESHOLD = 0.4
+
 -- User preference files (all in CONFIG_DIR)
 local LANG_FILE = CONFIG_DIR .. "/lang"
 local OUTPUT_FILE = CONFIG_DIR .. "/output"
@@ -2269,6 +2275,9 @@ end
 local function stopRecording()
     if not isRecording then return end
     isRecording = false
+    -- Clear any toggle latch so every stop path (hold-release, toggle tap, silence
+    -- auto-stop) leaves a clean slate — the next tap always starts a fresh recording.
+    _whisper.toggleLatched = false
     log("recording: stop")
 
     -- Stash how long the key was held; stats.record() (in finishInsertion) uses it.
@@ -2302,10 +2311,28 @@ end
 local GENERIC_MOD = { rightAlt = "alt", rightCmd = "cmd", rightCtrl = "ctrl" }
 local genericMod = GENERIC_MOD[TRIGGER_KEY]
 
-local releasePoller = nil
+-- Global so we can inspect state via hs -c. All hotkey state lives on this table
+-- rather than in top-level locals: the main chunk is near Lua's 200-locals-per-
+-- function cap, so new state/helpers go here to avoid tripping it.
+_whisper = { modTap = nil, recording = false, releasePoller = nil, keyDownTime = nil, toggleLatched = false }
 
--- Global so we can inspect state via hs -c
-_whisper = { modTap = nil, recording = false }
+function _whisper.stopReleasePoller()
+    if _whisper.releasePoller then _whisper.releasePoller:stop(); _whisper.releasePoller = nil end
+end
+
+-- Trigger key released (detected by the poller, or by a flagsChanged key-up).
+-- A quick tap latches recording ON (toggle); a longer hold stops it (push-to-talk).
+function _whisper.handleRelease()
+    _whisper.stopReleasePoller()
+    if not isRecording or _whisper.toggleLatched then return end
+    local held = hs.timer.secondsSinceEpoch() - (_whisper.keyDownTime or 0)
+    if held < TOGGLE_TAP_THRESHOLD then
+        _whisper.toggleLatched = true
+        log(string.format("toggle: latched on (tap %.2fs), waiting for next tap to stop", held))
+    else
+        stopRecording()
+    end
+end
 
 local modTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, function(event)
     -- Wrap in pcall so errors don't kill the eventtap
@@ -2313,21 +2340,30 @@ local modTap = hs.eventtap.new({ hs.eventtap.event.types.flagsChanged }, functio
         local rawFlags = event:rawFlags()
         local triggered = (rawFlags & triggerMask) > 0
 
-        if triggered and not isRecording then
-            startRecording()
-            -- Poll for release since flagsChanged doesn't fire on key-up
-            if releasePoller then releasePoller:stop() end
-            releasePoller = hs.timer.doEvery(0.1, function()
-                local mods = hs.eventtap.checkKeyboardModifiers()
-                if not mods[genericMod] then
-                    releasePoller:stop()
-                    releasePoller = nil
-                    stopRecording()
-                end
-            end)
-        elseif not triggered and isRecording then
-            if releasePoller then releasePoller:stop(); releasePoller = nil end
-            stopRecording()
+        if triggered then
+            -- Key pressed down.
+            if _whisper.toggleLatched then
+                -- Second tap while latched → stop and transcribe.
+                _whisper.toggleLatched = false
+                _whisper.stopReleasePoller()
+                stopRecording()
+            elseif not isRecording then
+                _whisper.keyDownTime = hs.timer.secondsSinceEpoch()
+                startRecording()
+                -- Poll for release since flagsChanged doesn't fire on key-up
+                _whisper.stopReleasePoller()
+                _whisper.releasePoller = hs.timer.doEvery(0.1, function()
+                    local mods = hs.eventtap.checkKeyboardModifiers()
+                    if not mods[genericMod] then
+                        _whisper.handleRelease()
+                    end
+                end)
+            end
+        else
+            -- flagsChanged fired with the trigger no longer set (key-up fallback).
+            if isRecording and not _whisper.toggleLatched then
+                _whisper.handleRelease()
+            end
         end
     end)
     if not ok then log("eventtap error: " .. tostring(err)) end
@@ -2346,6 +2382,23 @@ _whisper.modWatchdog = hs.timer.doEvery(5, function()
     end
 end)
 
+-- Extra toggle hotkey (ctrl+alt+shift+cmd+9): a discrete chord that toggles
+-- hands-free recording — press to start, press again to stop and insert. Unlike
+-- TRIGGER_KEY there's no hold/tap distinction. Starting this way sets the same
+-- toggle latch, so a right-Cmd tap (or silence auto-stop / Esc) also stops it.
+_whisper.toggleHotkey = hs.hotkey.bind({ "ctrl", "alt", "shift", "cmd" }, "9", function()
+    local ok, err = pcall(function()
+        if isRecording then
+            _whisper.stopReleasePoller()
+            stopRecording()
+        else
+            startRecording()
+            _whisper.toggleLatched = true
+        end
+    end)
+    if not ok then log("toggle hotkey error: " .. tostring(err)) end
+end)
+
 -- Cancel the current dictation entirely (Esc key or the ✕ button): tears down
 -- recording/transcription and sets a flag so any in-flight pipeline that
 -- finishes later inserts nothing. Safe to call at any stage.
@@ -2354,7 +2407,8 @@ function cancelDictation()
     log("dictation cancelled — discarding")
     dictationCancelled = true
     isRecording = false
-    if releasePoller then releasePoller:stop(); releasePoller = nil end
+    _whisper.toggleLatched = false
+    _whisper.stopReleasePoller()
     if partialTimer then partialTimer:stop(); partialTimer = nil end
     if silenceTimer then silenceTimer:stop(); silenceTimer = nil end
     stopRecordingIndicator()
