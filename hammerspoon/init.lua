@@ -1457,6 +1457,128 @@ end
 
 stats.load()
 
+--------------------------------------------------------------------------------
+-- Speech corpus (history): persist EVERY take to SQLite — the full three-part
+-- record June wants: what was said (audio FLAC), what whisper heard (raw), and
+-- what got inserted (final), plus a zh/en language signal.
+--
+-- GLOBAL (not `local`) on purpose — same 200-locals reason as `stats`. Holds one
+-- long-lived hs.sqlite3 connection, retained here so it isn't GC'd (a DB handle
+-- kept only by a bare `local` gets collected — same lesson as eventtap/timer in
+-- AGENTS.md). WAL mode lets an external sqlite3/Python/DuckDB reader query the
+-- corpus while Hammerspoon keeps writing. Audio is stored as FILES (FLAC), never
+-- as BLOBs — the DB row just points at audio_path.
+--
+-- Flow: history.capture() at the top of insertTranscribedText stashes the raw
+-- text + metadata in history.pending and kicks an async FLAC encode of the
+-- just-transcribed final.wav. history.finalize(status, finalText) then writes
+-- one row from pending on every terminal path (inserted / not_inserted /
+-- hallucination / empty).
+--------------------------------------------------------------------------------
+history = {
+    dbFile   = CONFIG_DIR .. "/local-whisper.db",
+    audioDir = CONFIG_DIR .. "/audio",
+    db       = nil,   -- retained connection (survives GC via this global)
+    pending  = nil,   -- capture()'d metadata awaiting finalize()
+    lastBase = nil,   -- for same-second id disambiguation
+    dupN     = 0,
+}
+
+function history.open()
+    os.execute("mkdir -p '" .. history.audioDir .. "'")
+    local db = hs.sqlite3.open(history.dbFile)
+    if not db then log("history: cannot open " .. history.dbFile); return end
+    db:exec([[
+        PRAGMA journal_mode=WAL;
+        PRAGMA synchronous=NORMAL;
+        CREATE TABLE IF NOT EXISTS takes (
+            id TEXT PRIMARY KEY,   -- "YYYYMMDD-HHMMSS" (local time)
+            ts INTEGER,            -- unix time
+            app TEXT,              -- foreground app at dictation
+            lang TEXT,             -- detected (auto) or configured (fixed)
+            zh INTEGER, en INTEGER,-- char/word counts of raw → "how English"
+            seconds INTEGER,       -- recording length
+            raw TEXT,              -- what whisper heard (pre postProcess/refine)
+            final TEXT,            -- what got inserted (post refine), or NULL
+            status TEXT,           -- inserted|not_inserted|hallucination|empty
+            model TEXT,            -- whisper model used
+            audio_path TEXT        -- absolute path to the FLAC
+        );
+        CREATE INDEX IF NOT EXISTS idx_takes_ts   ON takes(ts);
+        CREATE INDEX IF NOT EXISTS idx_takes_lang ON takes(lang);
+    ]])
+    history.db = db
+    log("history: db ready at " .. history.dbFile)
+end
+
+-- Stamp a unique id, stash raw text + metadata, kick an async FLAC encode of the
+-- audio whisper just transcribed. `rawText` is the untouched whisper output.
+function history.capture(rawText, detectedLang)
+    if not history.db then return end
+    if history.pending then
+        log("history: previous take was never finalized — overwriting")
+    end
+
+    -- Unique id at second resolution; disambiguate rapid same-second takes.
+    local base = os.date("%Y%m%d-%H%M%S")
+    local id
+    if history.lastBase == base then
+        history.dupN = history.dupN + 1
+        id = base .. "-" .. history.dupN
+    else
+        history.lastBase = base
+        history.dupN = 1
+        id = base
+    end
+
+    local audioPath = history.audioDir .. "/" .. id .. ".flac"
+    history.pending = {
+        id      = id,
+        ts      = os.time(),
+        app     = capturedAppName or "?",
+        lang    = detectedLang or getLang(),
+        raw     = rawText or "",
+        seconds = math.floor(stats.lastRecordingSeconds or 0),
+        model   = getModelName(),
+        audioPath = audioPath,
+    }
+
+    -- Encode final.wav → FLAC asynchronously (never blocks insertion). Reading
+    -- final.wav directly is race-free: no new recording can overwrite it until
+    -- the user starts AND finishes another dictation, which is seconds away —
+    -- far longer than this encode.
+    local srcWav = WHISPER_TMP .. "/final.wav"
+    if hs.fs.attributes(srcWav) then
+        local t = hs.task.new(FFMPEG, function(code)
+            if code ~= 0 then log("history: flac encode failed for " .. id) end
+        end, { "-y", "-i", srcWav, audioPath })
+        t:start()
+    else
+        log("history: no final.wav to archive for " .. id)
+    end
+end
+
+-- Write one row from history.pending, then clear it. Called on every terminal
+-- path. `finalText` is the inserted text (nil for hallucination/empty → NULL).
+function history.finalize(status, finalText)
+    local p = history.pending
+    history.pending = nil
+    if not (p and history.db) then return end
+    local c = stats.count(p.raw)   -- zh/en on the raw text = honest "how English"
+    local stmt = history.db:prepare(
+        "INSERT OR REPLACE INTO takes" ..
+        "(id,ts,app,lang,zh,en,seconds,raw,final,status,model,audio_path)" ..
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+    if not stmt then log("history: prepare failed"); return end
+    stmt:bind_values(p.id, p.ts, p.app, p.lang, c.zh, c.en, p.seconds,
+                     p.raw, finalText, status, p.model, p.audioPath)
+    stmt:step()
+    stmt:finalize()
+    log(string.format("history: %s [%s] lang=%s", p.id, status, tostring(p.lang)))
+end
+
+history.open()
+
 -- Auto-stop state
 local silentChunkCount = 0
 local silenceTimer = nil
@@ -2001,6 +2123,7 @@ local function finishInsertion(text, detectedLang)
     local finalText = normalizeText(ctx.text)
     if finalText == "" then
         log("final: empty text after actions")
+        history.finalize("empty", nil)
         hideOverlay()
         return
     end
@@ -2030,6 +2153,10 @@ local function finishInsertion(text, detectedLang)
     -- so the glance line picks up new totals without an explicit refresh.)
     if ctx.inserted then
         stats.record(finalText, stats.lastRecordingSeconds)
+        history.finalize("inserted", finalText)
+    else
+        -- Reached the cursor path but an action hook disabled insertion.
+        history.finalize("not_inserted", finalText)
     end
 
     -- Track in recent dictations
@@ -2061,14 +2188,17 @@ end
 -- Insert transcribed text at cursor, with post-processing, optional LLM refinement, and action hooks
 local function insertTranscribedText(text, detectedLang)
     if dictationCancelled then hideOverlay(); return end
-    if text == "" or isHallucination(text) then
-        hideOverlay()
-        return
-    end
+
+    -- Capture the raw whisper output (what it heard) + archive the audio BEFORE
+    -- any post-processing/refinement mutates the text. finalize() on every path.
+    history.capture(text, detectedLang)
+
+    if text == "" then history.finalize("empty", nil); hideOverlay(); return end
+    if isHallucination(text) then history.finalize("hallucination", nil); hideOverlay(); return end
 
     -- Apply app-aware post-processing
     text = postProcess(text, capturedAppBundleID)
-    if text == "" then hideOverlay(); return end
+    if text == "" then history.finalize("empty", nil); hideOverlay(); return end
 
     -- Skip LLM refinement for voice commands (refine would strip the prefix)
     local isVoiceCommand = text:lower():match("voice%s+command")
