@@ -98,10 +98,10 @@ local REFINE = {
     BACKEND_FILE = CONFIG_DIR .. "/refine_backend",    -- "ollama" (default) | "openai"
     MODEL_FILE = CONFIG_DIR .. "/refine_model",        -- ollama model
     DEFAULT_MODEL = "gemma3:4b",
-    OPENAI_KEY_FILE = CONFIG_DIR .. "/openai_api_key",
-    OPENAI_MODEL_FILE = CONFIG_DIR .. "/openai_model",
+    -- openai.json: { "api_key": "...", "model": "...", "base_url": "..." }
+    -- api_key required; model/base_url optional. Any OpenAI-compatible provider.
+    OPENAI_CONFIG_FILE = CONFIG_DIR .. "/openai.json",
     OPENAI_DEFAULT_MODEL = "gpt-5.6-luna",
-    OPENAI_BASE_URL_FILE = CONFIG_DIR .. "/openai_base_url",  -- any OpenAI-compatible provider
     OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1",
     MIN_CHARS = 50,  -- skip refinement for short text
     DEFAULT_PROMPT = [[You are a transcription cleanup tool. The input is dictated speech (English, Chinese, or mixed) transcribed by speech recognition. Output ONLY the cleaned text — no commentary, no preamble, no quotes.
@@ -171,39 +171,35 @@ function REFINE.backend()
     return "ollama"
 end
 
-function REFINE.openaiKey()
-    local f = io.open(REFINE.OPENAI_KEY_FILE, "r")
+-- Returns { key, model, baseUrl } or nil when openai.json is missing,
+-- unparseable, or has no api_key — nil means "backend unavailable".
+function REFINE.openaiConfig()
+    local f = io.open(REFINE.OPENAI_CONFIG_FILE, "r")
     if not f then return nil end
-    local v = f:read("*a"):gsub("%s+", ""); f:close()
-    if v == "" then return nil end
-    return v
-end
-
-function REFINE.openaiModel()
-    local f = io.open(REFINE.OPENAI_MODEL_FILE, "r")
-    if f then
-        local v = f:read("*a"):gsub("%s+", ""); f:close()
-        if v ~= "" then return v end
+    local raw = f:read("*a"); f:close()
+    local ok, cfg = pcall(hs.json.decode, raw)
+    if not ok or type(cfg) ~= "table" then
+        log("refine: cannot parse " .. REFINE.OPENAI_CONFIG_FILE)
+        return nil
     end
-    return REFINE.OPENAI_DEFAULT_MODEL
-end
-
-function REFINE.openaiBaseUrl()
-    local f = io.open(REFINE.OPENAI_BASE_URL_FILE, "r")
-    if f then
-        local v = f:read("*a"):gsub("%s+", ""):gsub("/+$", ""); f:close()
-        if v ~= "" then return v end
-    end
-    return REFINE.OPENAI_DEFAULT_BASE_URL
+    if type(cfg.api_key) ~= "string" or cfg.api_key == "" then return nil end
+    local model = (type(cfg.model) == "string" and cfg.model ~= "")
+        and cfg.model or REFINE.OPENAI_DEFAULT_MODEL
+    local baseUrl = (type(cfg.base_url) == "string" and cfg.base_url ~= "")
+        and cfg.base_url or REFINE.OPENAI_DEFAULT_BASE_URL
+    return { key = cfg.api_key, model = model, baseUrl = (baseUrl:gsub("/+$", "")) }
 end
 
 function REFINE.available()
-    if REFINE.backend() == "openai" then return REFINE.openaiKey() ~= nil end
+    if REFINE.backend() == "openai" then return REFINE.openaiConfig() ~= nil end
     return hasOllama()
 end
 
 function REFINE.modelLabel()
-    if REFINE.backend() == "openai" then return "openai/" .. REFINE.openaiModel() end
+    if REFINE.backend() == "openai" then
+        local cfg = REFINE.openaiConfig()
+        return "openai/" .. (cfg and cfg.model or "?")
+    end
     return "ollama/" .. getRefineModel()
 end
 
@@ -383,19 +379,18 @@ local function llmComplete(prompt, callback)
     local payloadFile = WHISPER_TMP .. "/refine_payload.json"
     local args, parse
     if REFINE.backend() == "openai" then
-        local key = REFINE.openaiKey()
-        if not key then
-            log("refine: no key in " .. REFINE.OPENAI_KEY_FILE)
+        local cfg = REFINE.openaiConfig()
+        if not cfg then
+            log("refine: " .. REFINE.OPENAI_CONFIG_FILE .. " missing or has no api_key")
             callback(nil)
             return
         end
-        local model = REFINE.openaiModel()
         local body = {
-            model = model,
+            model = cfg.model,
             messages = { { role = "user", content = prompt } },
         }
         -- reasoning_effort is only accepted by reasoning models; others 400 on it
-        if model:match("^gpt%-5") or model:match("^o%d") then
+        if cfg.model:match("^gpt%-5") or cfg.model:match("^o%d") then
             body.reasoning_effort = "minimal"
         end
         local f = io.open(payloadFile, "w")
@@ -403,10 +398,10 @@ local function llmComplete(prompt, callback)
         -- The key goes through a curl config file: argv is visible to `ps`, the file isn't
         local authFile = WHISPER_TMP .. "/refine_auth.cfg"
         local af = io.open(authFile, "w")
-        if af then af:write('header = "Authorization: Bearer ' .. key .. '"\n'); af:close() end
+        if af then af:write('header = "Authorization: Bearer ' .. cfg.key .. '"\n'); af:close() end
         args = {
             "-s", "--max-time", "10", "-X", "POST",
-            REFINE.openaiBaseUrl() .. "/chat/completions",
+            cfg.baseUrl .. "/chat/completions",
             "-H", "Content-Type: application/json",
             "-K", authFile,
             "-d", "@" .. payloadFile,
@@ -1809,7 +1804,7 @@ local function buildMenuBarMenu()
         })
     elseif REFINE.backend() == "openai" then
         table.insert(items, {
-            title = "LLM Refine (no key in ~/.local-whisper/openai_api_key)",
+            title = "LLM Refine (configure ~/.local-whisper/openai.json)",
             disabled = true,
         })
     else

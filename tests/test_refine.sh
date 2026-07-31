@@ -2,7 +2,7 @@
 # test_refine.sh — eval suite for LLM refinement (Ollama or OpenAI backend)
 # Tests that the refine prompt produces correct output for common patterns.
 # Backend is read from ~/.local-whisper/refine_backend (default: ollama).
-# Requires: Ollama running locally, or an OpenAI key in ~/.local-whisper/openai_api_key.
+# Requires: Ollama running locally, or ~/.local-whisper/openai.json with an api_key.
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -14,13 +14,6 @@ NC='\033[0m'
 OLLAMA_URL="http://localhost:11434/api/generate"
 CONFIG_DIR="$HOME/.local-whisper"
 
-# OpenAI-compatible base URL (mirrors REFINE.openaiBaseUrl() in init.lua)
-OPENAI_BASE_URL="https://api.openai.com/v1"
-if [[ -s "$CONFIG_DIR/openai_base_url" ]]; then
-    OPENAI_BASE_URL=$(tr -d '[:space:]' < "$CONFIG_DIR/openai_base_url" | sed 's:/*$::')
-fi
-OPENAI_URL="$OPENAI_BASE_URL/chat/completions"
-
 # Backend selection (mirrors REFINE.backend() in init.lua)
 BACKEND="ollama"
 if [[ -f "$CONFIG_DIR/refine_backend" ]]; then
@@ -29,17 +22,19 @@ if [[ -f "$CONFIG_DIR/refine_backend" ]]; then
 fi
 
 if [[ "$BACKEND" == "openai" ]]; then
-    KEY_FILE="$CONFIG_DIR/openai_api_key"
-    if [[ ! -s "$KEY_FILE" ]]; then
-        echo -e "${RED}Error: backend is openai but $KEY_FILE is missing/empty${NC}"
+    # openai.json: { "api_key": "...", "model": "...", "base_url": "..." }
+    # (mirrors REFINE.openaiConfig() in init.lua)
+    CFG_FILE="$CONFIG_DIR/openai.json"
+    if [[ ! -s "$CFG_FILE" ]] || ! jq -e '.api_key | strings | length > 0' "$CFG_FILE" >/dev/null 2>&1; then
+        echo -e "${RED}Error: backend is openai but $CFG_FILE is missing or has no api_key${NC}"
         exit 1
     fi
-    OPENAI_KEY=$(tr -d '[:space:]' < "$KEY_FILE")
-    MODEL_FILE="$CONFIG_DIR/openai_model"
-    if [[ -f "$MODEL_FILE" ]]; then
-        MODEL=$(tr -d '[:space:]' < "$MODEL_FILE")
-    fi
+    OPENAI_KEY=$(jq -r '.api_key' "$CFG_FILE")
+    MODEL=$(jq -r '.model // empty' "$CFG_FILE")
     MODEL="${MODEL:-gpt-5.6-luna}"
+    OPENAI_BASE_URL=$(jq -r '.base_url // empty' "$CFG_FILE" | sed 's:/*$::')
+    OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+    OPENAI_URL="$OPENAI_BASE_URL/chat/completions"
 else
     MODEL_FILE="$CONFIG_DIR/refine_model"
     if [[ -f "$MODEL_FILE" ]]; then
