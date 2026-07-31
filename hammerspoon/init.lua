@@ -409,7 +409,7 @@ local function llmComplete(prompt, callback)
         local af = io.open(authFile, "w")
         if af then af:write('header = "Authorization: Bearer ' .. cfg.key .. '"\n'); af:close() end
         args = {
-            "-s", "--max-time", "10", "-X", "POST",
+            "-s", "--max-time", "30", "-X", "POST",
             cfg.baseUrl .. "/chat/completions",
             "-H", "Content-Type: application/json",
             "-K", authFile,
