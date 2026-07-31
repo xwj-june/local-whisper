@@ -89,21 +89,40 @@ local ACTIONS_FILE = HOME .. "/.hammerspoon/local_whisper_actions.lua"
 local AUTO_STOP_SILENCE_SECONDS = 3
 local AUTO_STOP_THRESHOLD_DB = -40
 
--- LLM refinement (requires Ollama)
+-- LLM refinement (local Ollama, or OpenAI with text-only payloads — audio
+-- never leaves the machine either way). Grouped in a table: the main chunk
+-- is near Lua's 200-local limit.
 local REFINE_FILE = CONFIG_DIR .. "/refine"
 local REFINE_PROMPT_FILE = CONFIG_DIR .. "/refine_prompt"
-local REFINE_MODEL_FILE = CONFIG_DIR .. "/refine_model"
-local REFINE_DEFAULT_MODEL = "gemma3:4b"
-local REFINE_MIN_CHARS = 50  -- skip refinement for short text
-local REFINE_DEFAULT_PROMPT = "You are a text cleanup tool. Output ONLY the cleaned text, nothing else. Fix punctuation and capitalization. Remove ONLY filler words like um, uh, you know, I mean. Do NOT remove sentences or meaningful content. When the text lists sequential items using first/second/third or one/two/three, convert them into a numbered list with each item on a new line. NEVER add commentary or preamble. Just output the cleaned text."
+local REFINE = {
+    BACKEND_FILE = CONFIG_DIR .. "/refine_backend",    -- "ollama" (default) | "openai"
+    MODEL_FILE = CONFIG_DIR .. "/refine_model",        -- ollama model
+    DEFAULT_MODEL = "gemma3:4b",
+    OPENAI_KEY_FILE = CONFIG_DIR .. "/openai_api_key",
+    OPENAI_MODEL_FILE = CONFIG_DIR .. "/openai_model",
+    OPENAI_DEFAULT_MODEL = "gpt-5.6-luna",
+    MIN_CHARS = 50,  -- skip refinement for short text
+    DEFAULT_PROMPT = [[You are a transcription cleanup tool. The input is dictated speech (English, Chinese, or mixed) transcribed by speech recognition. Output ONLY the cleaned text — no commentary, no preamble, no quotes.
+Do:
+- Add punctuation and sentence breaks. Use Chinese punctuation for Chinese text, especially when it was dictated fast without pauses.
+- Convert spoken enumerations (first/second/third, one/two/three, 第一/第二/第三, 第一点/第二点) into a numbered list, one item per line.
+- Remove filler words (um, uh, you know, I mean; 嗯, 啊, 呃 — and 这个/就是/然后 only when used as fillers).
+- Remove stutters and immediate repetitions: when the same phrase is said twice in a row, keep one.
+- Fix obvious speech-recognition errors (e.g. Chinese homophone mistakes) only when the intended word is unambiguous.
+Do NOT:
+- Rewrite, rephrase, summarize, or reorder anything. Keep the speaker's wording and style.
+- Remove sentences or meaningful content.
+- Translate or unify languages: keep mixed Chinese/English exactly as mixed.
+- Change anything you are unsure about — when in doubt, leave it unchanged.]],
+}
 
 local function getRefineModel()
-    local f = io.open(REFINE_MODEL_FILE, "r")
+    local f = io.open(REFINE.MODEL_FILE, "r")
     if f then
         local val = f:read("*a"):gsub("%s+", ""); f:close()
         if val ~= "" then return val end
     end
-    return REFINE_DEFAULT_MODEL
+    return REFINE.DEFAULT_MODEL
 end
 
 local function getRefinePrompt()
@@ -113,7 +132,7 @@ local function getRefinePrompt()
         content = content:gsub("^%s+", ""):gsub("%s+$", "")
         if content ~= "" then return content end
     end
-    return REFINE_DEFAULT_PROMPT
+    return REFINE.DEFAULT_PROMPT
 end
 
 local function hasOllama()
@@ -139,6 +158,42 @@ end
 local function cycleRefine()
     local current = getRefineMode()
     setRefineMode(not current)
+end
+
+function REFINE.backend()
+    local f = io.open(REFINE.BACKEND_FILE, "r")
+    if f then
+        local v = f:read("*a"):gsub("%s+", ""); f:close()
+        if v == "openai" then return "openai" end
+    end
+    return "ollama"
+end
+
+function REFINE.openaiKey()
+    local f = io.open(REFINE.OPENAI_KEY_FILE, "r")
+    if not f then return nil end
+    local v = f:read("*a"):gsub("%s+", ""); f:close()
+    if v == "" then return nil end
+    return v
+end
+
+function REFINE.openaiModel()
+    local f = io.open(REFINE.OPENAI_MODEL_FILE, "r")
+    if f then
+        local v = f:read("*a"):gsub("%s+", ""); f:close()
+        if v ~= "" then return v end
+    end
+    return REFINE.OPENAI_DEFAULT_MODEL
+end
+
+function REFINE.available()
+    if REFINE.backend() == "openai" then return REFINE.openaiKey() ~= nil end
+    return hasOllama()
+end
+
+function REFINE.modelLabel()
+    if REFINE.backend() == "openai" then return "openai/" .. REFINE.openaiModel() end
+    return "ollama/" .. getRefineModel()
 end
 
 -- Timing
@@ -310,51 +365,106 @@ local function postProcess(text, appBundleID)
     return text
 end
 
-local function refineWithOllama(text, callback)
-    if not getRefineMode() or not hasOllama() or #text < REFINE_MIN_CHARS then
-        callback(text)
-        return
+-- One-shot LLM completion via the configured backend. Calls back with the
+-- response text, or nil on any failure — the caller owns the fallback, so a
+-- dead backend can never block text insertion.
+local function llmComplete(prompt, callback)
+    local payloadFile = WHISPER_TMP .. "/refine_payload.json"
+    local args, parse
+    if REFINE.backend() == "openai" then
+        local key = REFINE.openaiKey()
+        if not key then
+            log("refine: no key in " .. REFINE.OPENAI_KEY_FILE)
+            callback(nil)
+            return
+        end
+        local model = REFINE.openaiModel()
+        local body = {
+            model = model,
+            messages = { { role = "user", content = prompt } },
+        }
+        -- reasoning_effort is only accepted by reasoning models; others 400 on it
+        if model:match("^gpt%-5") or model:match("^o%d") then
+            body.reasoning_effort = "minimal"
+        end
+        local f = io.open(payloadFile, "w")
+        if f then f:write(hs.json.encode(body)); f:close() end
+        -- The key goes through a curl config file: argv is visible to `ps`, the file isn't
+        local authFile = WHISPER_TMP .. "/refine_auth.cfg"
+        local af = io.open(authFile, "w")
+        if af then af:write('header = "Authorization: Bearer ' .. key .. '"\n'); af:close() end
+        args = {
+            "-s", "--max-time", "10", "-X", "POST",
+            "https://api.openai.com/v1/chat/completions",
+            "-H", "Content-Type: application/json",
+            "-K", authFile,
+            "-d", "@" .. payloadFile,
+        }
+        parse = function(result)
+            return result.choices and result.choices[1]
+                and result.choices[1].message and result.choices[1].message.content
+        end
+    else
+        local f = io.open(payloadFile, "w")
+        if f then
+            f:write(hs.json.encode({ model = getRefineModel(), prompt = prompt, stream = false }))
+            f:close()
+        end
+        args = {
+            "-s", "--max-time", "60", "-X", "POST",
+            "http://localhost:11434/api/generate",
+            "-H", "Content-Type: application/json",
+            "-d", "@" .. payloadFile,
+        }
+        parse = function(result) return result.response end
     end
-    log("refine: sending to Ollama API (" .. #text .. " chars)")
-    local prompt = getRefinePrompt() .. "\n\n" .. text
-    local model = getRefineModel()
-    -- Use Ollama HTTP API (more reliable than CLI, avoids version mismatch issues)
-    local jsonPayload = hs.json.encode({
-        model = model,
-        prompt = prompt,
-        stream = false,
-    })
-    local tmpPayload = WHISPER_TMP .. "/refine_payload.json"
-    local f = io.open(tmpPayload, "w")
-    if f then f:write(jsonPayload); f:close() end
-    local task = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
+    local task = hs.task.new("/usr/bin/curl", function(code, stdout)
         if code == 0 and stdout and #stdout > 0 then
             local ok, result = pcall(hs.json.decode, stdout)
-            if ok and result and result.response then
-                local refined = result.response:gsub("^%s+", ""):gsub("%s+$", "")
-                -- Strip common LLM preamble
-                refined = refined:gsub("^[Hh]ere%s+is%s+the%s+cleaned%s+text:%s*\n?", "")
-                refined = refined:gsub("^[Hh]ere'?s?%s+the%s+cleaned[%-]?%s*text:%s*\n?", "")
-                refined = refined:gsub("^[Hh]ere%s+is%s+the%s+refined%s+text:%s*\n?", "")
-                refined = refined:gsub("^[Ss]ure[,!]?%s*[Hh]?e?r?e?'?s?%s*t?h?e?%s*", "")
-                refined = refined:gsub("^%s+", "")
-                if refined ~= "" then
-                    log("refine: success (" .. #refined .. " chars)")
-                    callback(refined)
+            if ok and result then
+                local out = parse(result)
+                if type(out) == "string" and out ~= "" then
+                    callback(out)
                     return
+                end
+                if result.error then
+                    log("refine: API error: " .. tostring(
+                        type(result.error) == "table" and result.error.message or result.error))
                 end
             end
         end
-        log("refine: failed (code=" .. tostring(code) .. "), using original")
-        callback(text)
-    end, {
-        "-s", "-X", "POST",
-        "http://localhost:11434/api/generate",
-        "-H", "Content-Type: application/json",
-        "-d", "@" .. tmpPayload,
-    })
+        log("refine: backend call failed (code=" .. tostring(code) .. ")")
+        callback(nil)
+    end, args)
     task:setEnvironment({ HOME = HOME, PATH = "/usr/bin:/bin" })
     task:start()
+end
+
+function REFINE.stripPreamble(s)
+    s = s:gsub("^%s+", ""):gsub("%s+$", "")
+    s = s:gsub("^[Hh]ere%s+is%s+the%s+cleaned%s+text:%s*\n?", "")
+    s = s:gsub("^[Hh]ere'?s?%s+the%s+cleaned[%-]?%s*text:%s*\n?", "")
+    s = s:gsub("^[Hh]ere%s+is%s+the%s+refined%s+text:%s*\n?", "")
+    s = s:gsub("^[Ss]ure[,!]?%s*[Hh]?e?r?e?'?s?%s*t?h?e?%s*", "")
+    return s:gsub("^%s+", "")
+end
+
+function REFINE.run(text, callback)
+    if not getRefineMode() or not REFINE.available() or #text < REFINE.MIN_CHARS then
+        callback(text)
+        return
+    end
+    log("refine: sending to " .. REFINE.backend() .. " (" .. #text .. " chars)")
+    llmComplete(getRefinePrompt() .. "\n\n" .. text, function(out)
+        local refined = out and REFINE.stripPreamble(out) or ""
+        if refined ~= "" then
+            log("refine: success (" .. #refined .. " chars)")
+            callback(refined)
+        else
+            log("refine: failed, using original")
+            callback(text)
+        end
+    end)
 end
 
 local function isHallucination(text)
@@ -783,7 +893,7 @@ local function refreshOverlayLabels()
     local enterOn = getEnterMode()
     overlay[EL.enterBg].fillColor  = enterOn and TH.accentBg or TH.offBg
     overlay[EL.enterTxt].textColor = enterOn and TH.accentText or TH.offText
-    local refineOn = getRefineMode() and hasOllama()
+    local refineOn = getRefineMode() and REFINE.available()
     overlay[EL.refineBg].fillColor  = refineOn and TH.accentBg or TH.offBg
     overlay[EL.refineTxt].textColor = refineOn and TH.accentText or TH.offText
 end
@@ -844,7 +954,7 @@ local function createOverlay()
     chip("output", 60, getOutputMode():upper(), false)         -- 4/5
     chip("enter",  32, "⏎",                     true, getEnterMode())  -- 6/7
     chip("model",  92, getModelName(),          false)         -- 8/9
-    chip("refine", 64, "refine", true, getRefineMode() and hasOllama())  -- 10/11
+    chip("refine", 64, "refine", true, getRefineMode() and REFINE.available())  -- 10/11
 
     -- 12–16: Audio level meter (5 bars; replaces the old single dot). Bar height
     -- tracks real mic input, so a dead/silent input device reads as flat bars.
@@ -1680,11 +1790,16 @@ local function buildMenuBarMenu()
     })
 
     -- LLM refinement
-    if hasOllama() then
+    if REFINE.available() then
         local refineState = getRefineMode() and "ON" or "OFF"
         table.insert(items, {
-            title = "LLM Refine: " .. refineState .. " (" .. getRefineModel() .. ")",
+            title = "LLM Refine: " .. refineState .. " (" .. REFINE.modelLabel() .. ")",
             fn = function() cycleRefine(); updateMenuBar() end,
+        })
+    elseif REFINE.backend() == "openai" then
+        table.insert(items, {
+            title = "LLM Refine (no key in ~/.local-whisper/openai_api_key)",
+            disabled = true,
         })
     else
         table.insert(items, {
@@ -2204,9 +2319,9 @@ local function insertTranscribedText(text, detectedLang)
     local isVoiceCommand = text:lower():match("voice%s+command")
 
     -- Optional LLM refinement (async, skips short text and voice commands)
-    if not isVoiceCommand and getRefineMode() and #text >= REFINE_MIN_CHARS then
+    if not isVoiceCommand and getRefineMode() and REFINE.available() and #text >= REFINE.MIN_CHARS then
         if getPreview() then setOverlayText("Refining...") end  -- minimal: spinner keeps running
-        refineWithOllama(text, function(refined)
+        REFINE.run(text, function(refined)
             finishInsertion(refined, detectedLang)
         end)
     else
@@ -3279,33 +3394,20 @@ saveMeetingOutput = function(notes, callback)
         md = md .. "## Transcript\n\n" .. transcriptText
     end
 
-    -- Try to summarize with Ollama
-    if getRefineMode() and hasOllama() and #transcriptText > 100 then
-        setNotepadStatus("Generating summary with Ollama...")
+    -- Try to summarize with the refine LLM backend
+    if getRefineMode() and REFINE.available() and #transcriptText > 100 then
+        setNotepadStatus("Generating summary (" .. REFINE.backend() .. ")...")
         local summaryPrompt = "Summarize this meeting transcript into: 1) Key Points (bullet list), 2) Action Items (bullet list), 3) Decisions Made (bullet list). Be concise. Output ONLY the summary in markdown format.\n\n" .. transcriptText:sub(1, 4000)
-        local jsonPayload = hs.json.encode({
-            model = getRefineModel(),
-            prompt = summaryPrompt,
-            stream = false,
-        })
-        local tmpPayload = WHISPER_TMP .. "/meeting_summary_payload.json"
-        local f = io.open(tmpPayload, "w")
-        if f then f:write(jsonPayload); f:close() end
-        local task = hs.task.new("/usr/bin/curl", function(code, stdout, stderr)
-            if code == 0 and stdout and #stdout > 0 then
-                local ok, result = pcall(hs.json.decode, stdout)
-                if ok and result and result.response then
-                    local summary = result.response:gsub("^%s+", ""):gsub("%s+$", "")
-                    if summary ~= "" then
-                        md = "# Meeting Notes — " .. os.date("%Y-%m-%d %H:%M") .. "\n\n"
-                            .. "## Summary\n\n" .. summary .. "\n\n"
-                        if notes and notes:gsub("%s+", "") ~= "" then
-                            md = md .. "## My Notes\n\n" .. notes .. "\n\n"
-                        end
-                        md = md .. "## Full Transcript\n\n" .. transcriptText
-                        log("meeting: summary generated (" .. #summary .. " chars)")
-                    end
+        llmComplete(summaryPrompt, function(out)
+            local summary = out and out:gsub("^%s+", ""):gsub("%s+$", "") or ""
+            if summary ~= "" then
+                md = "# Meeting Notes — " .. os.date("%Y-%m-%d %H:%M") .. "\n\n"
+                    .. "## Summary\n\n" .. summary .. "\n\n"
+                if notes and notes:gsub("%s+", "") ~= "" then
+                    md = md .. "## My Notes\n\n" .. notes .. "\n\n"
                 end
+                md = md .. "## Full Transcript\n\n" .. transcriptText
+                log("meeting: summary generated (" .. #summary .. " chars)")
             end
             -- Save regardless of summary success
             local fout = io.open(filepath, "w")
@@ -3313,15 +3415,7 @@ saveMeetingOutput = function(notes, callback)
             log("meeting: saved to " .. filepath)
             setNotepadStatus("Saved to " .. filepath)
             callback(filepath)
-        end, {
-            "-s", "-X", "POST",
-            "http://localhost:11434/api/generate",
-            "-H", "Content-Type: application/json",
-            "-d", "@" .. tmpPayload,
-            "--max-time", "60",
-        })
-        task:setEnvironment({ HOME = HOME, PATH = "/usr/bin:/bin" })
-        task:start()
+        end)
     else
         local fout = io.open(filepath, "w")
         if fout then fout:write(md); fout:close() end
