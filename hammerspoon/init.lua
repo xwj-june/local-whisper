@@ -101,6 +101,8 @@ local REFINE = {
     OPENAI_KEY_FILE = CONFIG_DIR .. "/openai_api_key",
     OPENAI_MODEL_FILE = CONFIG_DIR .. "/openai_model",
     OPENAI_DEFAULT_MODEL = "gpt-5.6-luna",
+    OPENAI_BASE_URL_FILE = CONFIG_DIR .. "/openai_base_url",  -- any OpenAI-compatible provider
+    OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1",
     MIN_CHARS = 50,  -- skip refinement for short text
     DEFAULT_PROMPT = [[You are a transcription cleanup tool. The input is dictated speech (English, Chinese, or mixed) transcribed by speech recognition. Output ONLY the cleaned text — no commentary, no preamble, no quotes.
 Do:
@@ -184,6 +186,15 @@ function REFINE.openaiModel()
         if v ~= "" then return v end
     end
     return REFINE.OPENAI_DEFAULT_MODEL
+end
+
+function REFINE.openaiBaseUrl()
+    local f = io.open(REFINE.OPENAI_BASE_URL_FILE, "r")
+    if f then
+        local v = f:read("*a"):gsub("%s+", ""):gsub("/+$", ""); f:close()
+        if v ~= "" then return v end
+    end
+    return REFINE.OPENAI_DEFAULT_BASE_URL
 end
 
 function REFINE.available()
@@ -395,7 +406,7 @@ local function llmComplete(prompt, callback)
         if af then af:write('header = "Authorization: Bearer ' .. key .. '"\n'); af:close() end
         args = {
             "-s", "--max-time", "10", "-X", "POST",
-            "https://api.openai.com/v1/chat/completions",
+            REFINE.openaiBaseUrl() .. "/chat/completions",
             "-H", "Content-Type: application/json",
             "-K", authFile,
             "-d", "@" .. payloadFile,

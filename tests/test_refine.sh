@@ -12,8 +12,14 @@ BOLD='\033[1m'
 NC='\033[0m'
 
 OLLAMA_URL="http://localhost:11434/api/generate"
-OPENAI_URL="https://api.openai.com/v1/chat/completions"
 CONFIG_DIR="$HOME/.local-whisper"
+
+# OpenAI-compatible base URL (mirrors REFINE.openaiBaseUrl() in init.lua)
+OPENAI_BASE_URL="https://api.openai.com/v1"
+if [[ -s "$CONFIG_DIR/openai_base_url" ]]; then
+    OPENAI_BASE_URL=$(tr -d '[:space:]' < "$CONFIG_DIR/openai_base_url" | sed 's:/*$::')
+fi
+OPENAI_URL="$OPENAI_BASE_URL/chat/completions"
 
 # Backend selection (mirrors REFINE.backend() in init.lua)
 BACKEND="ollama"
