@@ -98,8 +98,9 @@ local REFINE = {
     BACKEND_FILE = CONFIG_DIR .. "/refine_backend",    -- "ollama" (default) | "openai"
     MODEL_FILE = CONFIG_DIR .. "/refine_model",        -- ollama model
     DEFAULT_MODEL = "gemma3:4b",
-    -- openai.json: { "api_key": "...", "model": "...", "base_url": "..." }
-    -- api_key required; model/base_url optional. Any OpenAI-compatible provider.
+    -- openai.json: { "api_key": "...", "model": "...", "base_url": "...",
+    --               "reasoning_effort": "low" }
+    -- api_key required; the rest optional. Any OpenAI-compatible provider.
     OPENAI_CONFIG_FILE = CONFIG_DIR .. "/openai.json",
     OPENAI_DEFAULT_MODEL = "gpt-5.6-luna",
     OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1",
@@ -107,7 +108,7 @@ local REFINE = {
     DEFAULT_PROMPT = [[You are a transcription cleanup tool. The input is dictated speech (English, Chinese, or mixed) transcribed by speech recognition. Output ONLY the cleaned text — no commentary, no preamble, no quotes.
 Do:
 - Add punctuation and sentence breaks. Use Chinese punctuation for Chinese text, especially when it was dictated fast without pauses.
-- Convert spoken enumerations (first/second/third, one/two/three, 第一/第二/第三, 第一点/第二点) into a numbered list, one item per line.
+- Convert spoken enumerations (first/second/third, one/two/three, 第一/第二/第三, 第一点/第二点) into a numbered list, one item per line — but only when at least TWO sequential markers appear; a lone "first" is not a list. Sentences before and after the list stay in place.
 - Remove filler words (um, uh, you know, I mean; 嗯, 啊, 呃 — and 这个/就是/然后 only when used as fillers).
 - Remove stutters and immediate repetitions: when the same phrase is said twice in a row, keep one.
 - Fix obvious speech-recognition errors (e.g. Chinese homophone mistakes) only when the intended word is unambiguous.
@@ -115,6 +116,7 @@ Do NOT:
 - Rewrite, rephrase, summarize, or reorder anything. Keep the speaker's wording and style.
 - Remove sentences or meaningful content.
 - Translate or unify languages: keep mixed Chinese/English exactly as mixed.
+- Alter technical tokens: keep identifiers, CamelCase names, file names, and commands character-for-character (never split DocumentModels into Document Models).
 - Change anything you are unsure about — when in doubt, leave it unchanged.]],
 }
 
@@ -187,7 +189,12 @@ function REFINE.openaiConfig()
         and cfg.model or REFINE.OPENAI_DEFAULT_MODEL
     local baseUrl = (type(cfg.base_url) == "string" and cfg.base_url ~= "")
         and cfg.base_url or REFINE.OPENAI_DEFAULT_BASE_URL
-    return { key = cfg.api_key, model = model, baseUrl = (baseUrl:gsub("/+$", "")) }
+    local effort = (type(cfg.reasoning_effort) == "string" and cfg.reasoning_effort ~= "")
+        and cfg.reasoning_effort or "low"
+    return {
+        key = cfg.api_key, model = model,
+        baseUrl = (baseUrl:gsub("/+$", "")), effort = effort,
+    }
 end
 
 function REFINE.available()
@@ -389,9 +396,11 @@ local function llmComplete(prompt, callback)
             model = cfg.model,
             messages = { { role = "user", content = prompt } },
         }
-        -- reasoning_effort is only accepted by reasoning models; others 400 on it
+        -- reasoning_effort is only accepted by reasoning models; others 400 on it.
+        -- "low" is the lowest level every provider tested accepts (OpenAI also
+        -- takes "minimal", but e.g. terrakinc rejects it).
         if cfg.model:match("^gpt%-5") or cfg.model:match("^o%d") then
-            body.reasoning_effort = "minimal"
+            body.reasoning_effort = cfg.effort
         end
         local f = io.open(payloadFile, "w")
         if f then f:write(hs.json.encode(body)); f:close() end

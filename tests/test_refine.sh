@@ -4,6 +4,7 @@
 # Backend is read from ~/.local-whisper/refine_backend (default: ollama).
 # Requires: Ollama running locally, or ~/.local-whisper/openai.json with an api_key.
 set -euo pipefail
+export LC_ALL=en_US.UTF-8  # multibyte-safe grep for the Chinese cases
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,6 +33,8 @@ if [[ "$BACKEND" == "openai" ]]; then
     OPENAI_KEY=$(jq -r '.api_key' "$CFG_FILE")
     MODEL=$(jq -r '.model // empty' "$CFG_FILE")
     MODEL="${MODEL:-gpt-5.6-luna}"
+    EFFORT=$(jq -r '.reasoning_effort // empty' "$CFG_FILE")
+    EFFORT="${EFFORT:-low}"
     OPENAI_BASE_URL=$(jq -r '.base_url // empty' "$CFG_FILE" | sed 's:/*$::')
     OPENAI_BASE_URL="${OPENAI_BASE_URL:-https://api.openai.com/v1}"
     OPENAI_URL="$OPENAI_BASE_URL/chat/completions"
@@ -52,7 +55,7 @@ else
 You are a transcription cleanup tool. The input is dictated speech (English, Chinese, or mixed) transcribed by speech recognition. Output ONLY the cleaned text — no commentary, no preamble, no quotes.
 Do:
 - Add punctuation and sentence breaks. Use Chinese punctuation for Chinese text, especially when it was dictated fast without pauses.
-- Convert spoken enumerations (first/second/third, one/two/three, 第一/第二/第三, 第一点/第二点) into a numbered list, one item per line.
+- Convert spoken enumerations (first/second/third, one/two/three, 第一/第二/第三, 第一点/第二点) into a numbered list, one item per line — but only when at least TWO sequential markers appear; a lone "first" is not a list. Sentences before and after the list stay in place.
 - Remove filler words (um, uh, you know, I mean; 嗯, 啊, 呃 — and 这个/就是/然后 only when used as fillers).
 - Remove stutters and immediate repetitions: when the same phrase is said twice in a row, keep one.
 - Fix obvious speech-recognition errors (e.g. Chinese homophone mistakes) only when the intended word is unambiguous.
@@ -60,6 +63,7 @@ Do NOT:
 - Rewrite, rephrase, summarize, or reorder anything. Keep the speaker's wording and style.
 - Remove sentences or meaningful content.
 - Translate or unify languages: keep mixed Chinese/English exactly as mixed.
+- Alter technical tokens: keep identifiers, CamelCase names, file names, and commands character-for-character (never split DocumentModels into Document Models).
 - Change anything you are unsure about — when in doubt, leave it unchanged.
 EOF
 )
@@ -76,12 +80,12 @@ call_llm() {
     if [[ "$BACKEND" == "openai" ]]; then
         payload=$(python3 -c '
 import json, sys
-model = sys.argv[1]
+model, effort = sys.argv[1], sys.argv[2]
 body = {"model": model, "messages": [{"role": "user", "content": sys.stdin.read()}]}
 if model.startswith("gpt-5") or (len(model) > 1 and model[0] == "o" and model[1].isdigit()):
-    body["reasoning_effort"] = "minimal"
+    body["reasoning_effort"] = effort
 print(json.dumps(body))
-' "$MODEL" <<< "$PROMPT
+' "$MODEL" "$EFFORT" <<< "$PROMPT
 
 $input")
         response=$(curl -s --max-time 30 -X POST "$OPENAI_URL" \
@@ -168,7 +172,12 @@ test_case() {
         min_count:*|max_count:*)
             local pattern="${check#*:}"
             local count
-            count=$(echo "$output" | grep -o "$pattern" | wc -l | tr -d ' ')
+            # python, not grep: BSD grep miscounts multibyte (CJK) patterns
+            count=$(printf '%s' "$output" | python3 -c '
+import sys, re
+print(len(re.findall(sys.argv[1], sys.stdin.read())))
+' "$pattern" || true)
+            count="${count:-0}"
             if [[ "$check" == min_count:* ]]; then
                 [[ "$count" -ge "$expected" ]] && passed=true
             else
@@ -264,9 +273,11 @@ test_case "Capitalize first word" \
 echo ""
 echo -e "${BOLD}--- Chinese: punctuation for pause-free speech ---${NC}"
 
+# The class must contain FULLWIDTH ,?!;: (U+FF0C etc.) — halfwidth
+# lookalikes silently count 0. Verify with hexdump after editing this line.
 test_case "Unpunctuated Chinese run gets punctuation" \
     "我想知道一点就是现在我说话它并没有很多标点符号这是因为我说话的时候没有暂停还是有别的原因有什么办法可以解决这个问题" \
-    "min_count:[,。?!;]" "3"
+    "min_count:[。，？！；：、,?!;:]" "3"
 
 test_case "Chinese content preserved" \
     "我想知道一点就是现在我说话它并没有很多标点符号这是因为我说话的时候没有暂停还是有别的原因有什么办法可以解决这个问题" \
